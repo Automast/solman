@@ -393,7 +393,11 @@ async function getSolBalance(pubkeyStr) {
 async function getSolMarketData() {
   try {
     const response = await axios.get(
-      "https://api.coingecko.com/api/v3/coins/solana?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false&sparkline=false"
+      "https://api.coingecko.com/api/v3/coins/solana?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false&sparkline=false", 
+      { 
+        headers: { 'Cache-Control': 'no-cache' },
+        params: { _: new Date().getTime() } // Add timestamp to bust cache
+      }
     );
     const data = response.data.market_data;
     
@@ -455,7 +459,8 @@ async function getAllTokenBalances(pubkeyStr) {
 async function getSolPriceUSD() {
   try {
     const r = await axios.get("https://api.coingecko.com/api/v3/simple/price", {
-      params: { ids: "solana", vs_currencies: "usd" },
+      params: { ids: "solana", vs_currencies: "usd", _: new Date().getTime() }, // Add timestamp parameter to bust cache
+      headers: { 'Cache-Control': 'no-cache' }
     })
     return new Decimal(r.data.solana.usd)
   } catch (e) {
@@ -469,8 +474,8 @@ async function getSolPriceUSD() {
 async function getTokenInfoFromAggregator(mintAddress) {
   try {
     // DexScreener search endpoint for Solana tokens by mint
-    const url = `https://api.dexscreener.com/latest/dex/search?chain=solana&q=${mintAddress}`
-    const res = await axios.get(url)
+    const url = `https://api.dexscreener.com/latest/dex/search?chain=solana&q=${mintAddress}&_=${new Date().getTime()}`
+    const res = await axios.get(url, { headers: { 'Cache-Control': 'no-cache' } })
     if (!res.data || !res.data.pairs || !res.data.pairs.length) {
       return null
     }
@@ -786,9 +791,7 @@ bot.onText(/\/start/, async (msg) => {
 });
 
 
-// I have not modified the /home command, but I have added a new command /start that is similar to /home.
-// If /home is not working, you can duplicate /start and modify it to suit /home
-// Home command
+// Home command - Fixed to match /start behavior
 bot.onText(/\/home/, async (msg) => {
   try {
     const chatId = msg.chat.id;
@@ -809,16 +812,7 @@ bot.onText(/\/home/, async (msg) => {
       parse_mode: "Markdown"
     });
 
-    // Force fresh data load
-    const u = await getUserRow(chatId);
-    const cwe = await getConfigValue('create_wallet_enabled');
-    
-    if (!u || !u.public_key) {
-      const t = "No wallet found. Please select:";
-      const m = noWalletKeyboard(cwe);
-      return editMessageText(chatId, loadingMsg.message_id, t, m);
-    }
-
+    // Always call showMainMenu directly to ensure fresh data
     await showMainMenu(chatId, loadingMsg.message_id);
     
   } catch (err) {
@@ -1878,12 +1872,12 @@ ${wBalanceLine}`
             // Example message:
             const sellMsg =
 `*Select a token to sell* (${list.length} total)
-*Balance:* ${sb.toFixed(4)} SOL ($${userSolBalUsd.toFixed(2)})
+*Balance:* ${sb.toFixed(4)} SOL (${userSolBalUsd.toFixed(2)})
 
 [**🄲 ${tk.symbol}**](${tk.chartLink})
 Token Balance: ${tk.tokenBalance.toFixed(tk.decimals)}
 In SOL: ${tk.solValue.toFixed(4)} SOL
-In USD: $${tk.usdValue.toFixed(2)}
+In USD: ${tk.usdValue.toFixed(2)}
 
 How many *${tk.symbol}* do you want to sell?`
 
@@ -2055,12 +2049,12 @@ async function showSellTokensList(chatId) {
     const userSolBalUsd = userSolBal.mul(await getSolPriceUSD())
 
     let txt = `**Select a token to sell** (${tokens.length} found)\n` +
-              `**Balance**: ${userSolBal.toFixed(4)} SOL ($${userSolBalUsd.toFixed(2)})\n\n`
+              `**Balance**: ${userSolBal.toFixed(4)} SOL (${userSolBalUsd.toFixed(2)})\n\n`
 
     for (let i = startIndex; i < endIndex; i++) {
       const tk = tokens[i]
       // Example line: [**🄲 {symbol}**](chart) — {solValue} SOL ($usdValue) [Hide]
-      txt += `[**🄲 ${tk.symbol}**](${tk.chartLink}) — ${tk.solValue.toFixed(4)} SOL ($${tk.usdValue.toFixed(2)})\n`
+      txt += `[**🄲 ${tk.symbol}**](${tk.chartLink}) — ${tk.solValue.toFixed(4)} SOL (${tk.usdValue.toFixed(2)})\n`
     }
 
     // Build inline keyboard
@@ -2188,7 +2182,7 @@ bot.onText(/\/positions/, async (msg) => {
 
     let txt = `📊 *Your Positions*\n\n` +
               `*Wallet:* ${u.public_key}\n\n` +
-              `*SOL Balance:* ${sb.toFixed(4)} SOL (~$${su.toFixed(2)})\n\n`
+              `*SOL Balance:* ${sb.toFixed(4)} SOL (~${su.toFixed(2)})\n\n`
 
     const rawTokens = await getAllTokenBalances(u.public_key)
     const tokenInfos = []
@@ -2215,7 +2209,7 @@ bot.onText(/\/positions/, async (msg) => {
       txt += "*SPL Token Balances:*\n"
       for (const ti of tokenInfos) {
         txt += `- ${ti.symbol}: ${ti.amount.toFixed(ti.decimals)} tokens ` +
-               `(~${ti.solValue.toFixed(4)} SOL / $${ti.usdValue.toFixed(2)})\n`
+               `(~${ti.solValue.toFixed(4)} SOL / ${ti.usdValue.toFixed(2)})\n`
       }
     }
 
