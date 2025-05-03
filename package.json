@@ -1,0 +1,25 @@
+{
+  "name": "solanabot",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "scripts": {
+    "start": "concurrently \"node bot.js\" \"node kenbot.js\"",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@solana/web3.js": "^1.98.0",
+    "axios": "^1.7.9",
+    "bs58": "^6.0.0",
+    "concurrently": "^8.2.0",
+    "decimal.js": "^10.4.3",
+    "dotenv": "^16.4.7",
+    "node-telegram-bot-api": "^0.63.0",
+    "solana-swap": "^1.1.6",
+    "sqlite3": "^5.1.7",
+    "winston": "^3.17.0"
+  }
+}
