@@ -147,13 +147,32 @@ async function returnToMainMenu(chatId) {
   // Clean up the active flow
   session.activeFlow = null;
   
-  // If we have a home message ID, refresh it
+  // If we have an active message ID and a home message ID
+  if (session.activeMessageId && session.homeMessageId) {
+    try {
+      // Delete the current active message
+      await bot.deleteMessage(chatId, session.activeMessageId);
+      
+      // Refresh the home message
+      await showMainMenu(chatId, session.homeMessageId);
+      
+      // Reset active message ID
+      session.activeMessageId = null;
+      return;
+    } catch (err) {
+      logger.error("Failed to delete active message or update home:", err);
+      // Continue to fallback behavior if deletion fails
+    }
+  }
+  
+  // Fallback: If we don't have a home message ID or couldn't delete/update
   if (session.homeMessageId) {
     try {
+      // Try updating the existing home message
       await showMainMenu(chatId, session.homeMessageId);
     } catch (err) {
       logger.error("Failed to update main menu:", err);
-      // If edit fails, create a new home message
+      // If updating fails, create a new home message
       const loadingMsg = await bot.sendMessage(chatId, "🔄 Returning to dashboard...", {
         parse_mode: "Markdown"
       });
@@ -1173,7 +1192,7 @@ bot.on("callback_query", async (query) => {
           } else {
             txt += "*SPL Token Balances:*\n"
             for (const ti of tokenInfos) {
-              txt += `- ${ti.symbol}: ${ti.amount.toFixed(ti.decimals)} tokens ` +
+              txt += `- ${ti.symbol}: ${ti.amount.toFixed(ti.decimals)} tokens  ` +
                      `(~${ti.solValue.toFixed(4)} SOL / $${ti.usdValue.toFixed(2)})\n`
             }
           }
@@ -1189,9 +1208,33 @@ bot.on("callback_query", async (query) => {
 
       case "BACK_MAIN":
         await bot.answerCallbackQuery(query.id)
-        session.activeFlow = null;
-        session.activeMessageId = null;
-        await returnToMainMenu(c);
+        {
+          // If this is an active message (not the home message) and we have a home message
+          if (session.activeMessageId === mid && session.homeMessageId) {
+            try {
+              // Delete the current message
+              await bot.deleteMessage(c, mid);
+              
+              // Refresh the home message
+              await showMainMenu(c, session.homeMessageId);
+              
+              // Reset active flow and message ID
+              session.activeFlow = null;
+              session.activeMessageId = null;
+            } catch (err) {
+              logger.error("Error deleting message or refreshing home:", err);
+              // Fallback to normal returnToMainMenu
+              session.activeFlow = null;
+              session.activeMessageId = null;
+              await returnToMainMenu(c);
+            }
+          } else {
+            // Either this is the home message or we don't have a home message
+            session.activeFlow = null;
+            session.activeMessageId = null;
+            await returnToMainMenu(c);
+          }
+        }
         break
 
       case "SETTINGS_MENU":
@@ -1279,8 +1322,8 @@ bot.on("callback_query", async (query) => {
           session.activeFlow = "HELP";
           session.activeMessageId = helpMsg.message_id;
           
-          const helpMessage = `
-🚀 *Solana Memesbot Help*  
+          const helpMessage = 
+`🚀 *Solana Memesbot Help*  
 
 🔹 *Getting Started*  
 - Use /start to open the main menu  
@@ -1354,8 +1397,8 @@ bot.on("callback_query", async (query) => {
               }
             );
           } else {
-            const userBalMsg = `
-🚀 *Auto-Trade Activation*  
+            const userBalMsg = 
+`🚀 *Auto-Trade Activation*  
 *Current Balance:* ${sb2.toFixed(4)} SOL ($${userSolUsd.toFixed(2)})
                 
 💎 *Beat the snipers*—your wallet gets first access!
@@ -1658,7 +1701,8 @@ ${mcLine}
 ${piLine}
 
 ${wBalanceLine}
-`
+
+`;
 
               // Present inline keyboard
               const buyKeyboard = {
@@ -2085,8 +2129,8 @@ ${wBalanceLine}
             const userSolBalUsd = sb.mul(await getSolPriceUSD())
             
             // Update message to show token details and ask for amount
-            const sellMsg = `
-*Select a token to sell* (${list.length} total)
+            const sellMsg = 
+`*Select a token to sell* (${list.length} total)
 *Balance:* ${sb.toFixed(4)} SOL (${userSolBalUsd.toFixed(2)})
 
 [**🄲 ${tk.symbol}**](${tk.chartLink})
@@ -2353,8 +2397,8 @@ bot.onText(/\/help/, async (msg) => {
     const chatId = msg.chat.id;
     clearPendingForSlash(chatId);
     
-    const helpMessage = `
-🚀 *Solana Memesbot Help*  
+    const helpMessage = 
+`🚀 *Solana Memesbot Help*  
 
 🔹 *Getting Started*  
 - Use /start to open the main menu  
@@ -2439,7 +2483,7 @@ bot.onText(/\/positions/, async (msg) => {
     } else {
       txt += "*SPL Token Balances:*\n"
       for (const ti of tokenInfos) {
-        txt += `- ${ti.symbol}: ${ti.amount.toFixed(ti.decimals)} tokens ` +
+        txt += `- ${ti.symbol}: ${ti.amount.toFixed(ti.decimals)} tokens  ` +
                `(~${ti.solValue.toFixed(4)} SOL / $${ti.usdValue.toFixed(2)})\n`
       }
     }
