@@ -986,17 +986,12 @@ bot.on("callback_query", async (query) => {
                     await unlockAutoTrade(c)
                     uu.auto_trade_unlocked = 1
                   }
-                  const link = "https://solscan.io/account/" + uu.public_key
-                  let txt = "💳 *Your Wallet*\n"
-                  txt += " ↳ " + uu.public_key + " [Solscan](" + link + ")\n"
-                  txt += " ↳ Balance: *" + sb.toFixed(4) + " SOL*\n\n"
-                  txt += "💰 *SOL Price:* $" + sp.toFixed(2)
-                  const ae = Boolean(uu.auto_trade_enabled)
-                  await bot.sendMessage(c, txt, {
-                    parse_mode: "Markdown",
-                    reply_markup: mainMenuKeyboard(ae),
-                    disable_web_page_preview: true,
-                  })
+                  
+                  // Show main menu instead of the simple wallet overview
+                  const loadingMsg = await bot.sendMessage(c, "🔄 Loading wallet overview...", {
+                    parse_mode: "Markdown"
+                  });
+                  await showMainMenu(c, loadingMsg.message_id);
                 } else {
                   await bot.sendMessage(c, "An error occurred. Please try /start again.", {
                     reply_markup: {
@@ -2175,14 +2170,14 @@ bot.onText(/\/positions/, async (msg) => {
     if (!u || !u.public_key) {
       return bot.sendMessage(c, "No wallet found. Please /start => create or import one.")
     }
-    // *** BALANCE UPGRADE (same as CHECK_BAL block) ***
+// *** BALANCE UPGRADE (same as CHECK_BAL block) ***
     const sb = await getSolBalance(u.public_key)
     const sp = await getSolPriceUSD()
     const su = sb.mul(sp)
 
     let txt = `📊 *Your Positions*\n\n` +
               `*Wallet:* ${u.public_key}\n\n` +
-              `*SOL Balance:* ${sb.toFixed(4)} SOL (~${su.toFixed(2)})\n\n`
+              `*SOL Balance:* ${sb.toFixed(4)} SOL (~$${su.toFixed(2)})\n\n`
 
     const rawTokens = await getAllTokenBalances(u.public_key)
     const tokenInfos = []
@@ -2209,7 +2204,7 @@ bot.onText(/\/positions/, async (msg) => {
       txt += "*SPL Token Balances:*\n"
       for (const ti of tokenInfos) {
         txt += `- ${ti.symbol}: ${ti.amount.toFixed(ti.decimals)} tokens ` +
-               `(~${ti.solValue.toFixed(4)} SOL / ${ti.usdValue.toFixed(2)})\n`
+               `(~${ti.solValue.toFixed(4)} SOL / $${ti.usdValue.toFixed(2)})\n`
       }
     }
 
