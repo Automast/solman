@@ -582,7 +582,7 @@ function mainMenuKeyboard(autoTradeEnabled) {
         { text: "💸 Withdraw", callback_data: "WITHDRAW_MENU" },
       ],
       [
-        { text: "❓ Help", callback_data: "SHOW_HELP" },
+        { text: "📈 PnL", callback_data: "SHOW_PNL" },
         { text: "⚙️ Settings", callback_data: "SETTINGS_MENU" },
       ],
     ],
@@ -721,7 +721,7 @@ async function showMainMenu(chatId, messageId) {
             { text: "💸 Withdraw", callback_data: "WITHDRAW_MENU" },
           ],
           [
-            { text: "❓ Help", callback_data: "SHOW_HELP" },
+            { text: "📈 PnL", callback_data: "SHOW_PNL" },
             { text: "⚙️ Settings", callback_data: "SETTINGS_MENU" },
           ],
           [
@@ -901,6 +901,139 @@ bot.onText(/\/connect/, async (msg) => {
     await bot.sendMessage(chatId, "Error processing your request. Please try again.");
   }
 });
+
+// PnL calculation function
+async function calculatePnL(chatId) {
+  try {
+    const u = await getUserRow(chatId)
+    if (!u || !u.public_key) {
+      return null
+    }
+    
+    // Get current SOL balance and USD value
+    const solBalance = await getSolBalance(u.public_key)
+    const solPrice = await getSolPriceUSD()
+    const solUsdValue = solBalance.mul(solPrice)
+    
+    // Get all tokens and their values
+    const tokenBalances = await getAllTokenBalances(u.public_key)
+    const tokenPnLData = []
+    
+    // Calculate PnL for each token (this will be unrealized PnL since we don't have historical purchase data)
+    let totalTokensUsdValue = new Decimal(0)
+    await Promise.all(tokenBalances.map(async (t) => {
+      // Skip SOL pseudo token
+      if (t.mint === "So11111111111111111111111111111111111111112") return
+      
+      const info = await getTokenInfoFromAggregator(t.mint)
+      if (!info || !info.symbol || !info.symbol.trim() || info.price <= 0) return
+      
+      const tokenQuantity = t.amount
+      const currentPrice = new Decimal(info.price)
+      const currentUsdValue = tokenQuantity.mul(currentPrice)
+      totalTokensUsdValue = totalTokensUsdValue.add(currentUsdValue)
+      
+      // Calculate 24h PnL based on price change percentage
+      const h24Change = new Decimal(info.h24 || 0).div(100)
+      const prev24hPrice = currentPrice.div(h24Change.add(1))
+      const prev24hValue = tokenQuantity.mul(prev24hPrice)
+      const pnl24h = currentUsdValue.sub(prev24hValue)
+      const pnl24hPercent = h24Change.mul(100)
+      
+      tokenPnLData.push({
+        symbol: info.symbol,
+        mint: t.mint,
+        quantity: tokenQuantity,
+        currentPrice: currentPrice,
+        currentUsdValue: currentUsdValue,
+        h24PnL: pnl24h,
+        h24PnLPercent: pnl24hPercent,
+        decimals: t.decimals
+      })
+    }))
+    
+    // Sort tokens by USD value (highest first)
+    tokenPnLData.sort((a, b) => b.currentUsdValue.minus(a.currentUsdValue).toNumber())
+    
+    // Calculate portfolio totals
+    const totalPortfolioValue = solUsdValue.add(totalTokensUsdValue)
+    
+    return {
+      solBalance,
+      solPrice,
+      solUsdValue,
+      tokenPnLData,
+      totalTokensUsdValue,
+      totalPortfolioValue
+    }
+  } catch (err) {
+    logger.error("calculatePnL error:", err)
+    return null
+  }
+}
+
+// Function to show PnL information
+async function showPnL(chatId) {
+  try {
+    const pnlData = await calculatePnL(chatId)
+    if (!pnlData) {
+      return bot.sendMessage(chatId, "Could not calculate PnL. Please try again later.", {
+        reply_markup: {
+          inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+        },
+      })
+    }
+    
+    // Create the PnL message
+    let message = `📈 *Profit & Loss Analysis*\n\n`
+    
+    // Portfolio summary
+    message += `*Portfolio Overview*\n`
+    message += `• 💰 Total Value: $${pnlData.totalPortfolioValue.toFixed(2)}\n`
+    message += `• 🪙 SOL Balance: ${pnlData.solBalance.toFixed(4)} SOL ($${pnlData.solUsdValue.toFixed(2)})\n`
+    message += `• 💎 Token Value: $${pnlData.totalTokensUsdValue.toFixed(2)}\n\n`
+    
+    // Token PnL details
+    if (pnlData.tokenPnLData.length > 0) {
+      message += `*Token Performance (24h)*\n`
+      pnlData.tokenPnLData.slice(0, 10).forEach(token => {
+        const isPnLPositive = token.h24PnLPercent.gte(0)
+        const pnlSymbol = isPnLPositive ? '📈' : '📉'
+        const pnlSign = isPnLPositive ? '+' : ''
+        
+        message += `• ${token.symbol}: ${token.quantity.toFixed(token.decimals)} tokens\n`
+        message += `  Value: $${token.currentUsdValue.toFixed(2)} | 24h: ${pnlSign}${token.h24PnLPercent.toFixed(2)}% ${pnlSymbol}\n`
+      })
+      
+      if (pnlData.tokenPnLData.length > 10) {
+        message += `\n_... and ${pnlData.tokenPnLData.length - 10} more tokens_\n`
+      }
+    } else {
+      message += `No tokens found in your wallet.\n`
+    }
+    
+    message += `\n*Note:* PnL calculations are based on current market data and 24h price changes. Historical purchase data is not available.`
+    
+    await bot.sendMessage(chatId, message, {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "Refresh PnL", callback_data: "REFRESH_PNL" },
+            { text: "« Back", callback_data: "BACK_MAIN" }
+          ]
+        ],
+      },
+    })
+  } catch (err) {
+    logger.error("showPnL error:", err)
+    await bot.sendMessage(chatId, "Error calculating PnL. Please try again.", {
+      reply_markup: {
+        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+      },
+    })
+  }
+}
 
 // ---------------------------------------------------------
 // Callback queries - big try/catch
@@ -1263,7 +1396,7 @@ Higher allocations get *priority access + optimized trade execution*`;
                         if (atAmt.lt(minSol)) {
                             await bot.sendMessage(
                                 c,
-                                `⚠️ Minimum allocation is ${minSol.toFixed(4)} SOL ($${minA2.toFixed(2)}).`,
+                                `⚠️ Minimum allocation is ($${minA2.toFixed(2)}) SOL.`,
                                 {
                                     parse_mode: "Markdown",
                                     reply_markup: {
@@ -1856,12 +1989,24 @@ ${wBalanceLine}`
         }
         break
 
+      // New PnL feature
+      case "SHOW_PNL":
+        await bot.answerCallbackQuery(query.id)
+        await showPnL(c)
+        break
+
+      case "REFRESH_PNL":
+        await bot.answerCallbackQuery(query.id, { text: "Refreshing PnL data..." })
+        await showPnL(c)
+        break
+
       default:
         // Possibly it's a SELL_TOKEN_INDEX_ pattern
         if (d.startsWith("SELL_TOKEN_INDEX_")) {
           await bot.answerCallbackQuery(query.id)
           {
             const idx = parseInt(d.replace("SELL_TOKEN_INDEX_",""),10)
+const idx = parseInt(d.replace("SELL_TOKEN_INDEX_",""),10)
             const list = userSessions[c]?.sellTokens || []
             if (!list[idx]) {
               await bot.sendMessage(c, "Token index not found. Please refresh the list.", {
@@ -2120,6 +2265,7 @@ bot.setMyCommands([
   { command: "withdraw", description: "Withdraw SOL to another address" },
   { command: "settings", description: "Manage wallet settings" },
   { command: "help", description: "Show help info" },
+  { command: "pnl", description: "View profit and loss analysis" }
 ]);
 
 // /help
@@ -2141,6 +2287,7 @@ bot.onText(/\/help/, async (msg) => {
 - *💱 Sell Tokens*: Swap SPL tokens → SOL (auto-detects holdings)  
 - *🤖 Auto-Trade*: Allocate SOL for priority access to new launches  
 - *💸 Withdraw*: Send SOL to external wallets  
+- *📈 PnL*: Track your portfolio's profit and loss
 
 ⚠️ *Trading Tips*  
 - Default slippage: 1% 
@@ -2247,7 +2394,7 @@ bot.onText(/\/sell/, (msg) => {
   }
 })
 
-// /withdraww
+// /withdraw
 bot.onText(/\/withdraw/, (msg) => {
   try {
     const c = msg.chat.id
@@ -2266,6 +2413,22 @@ bot.onText(/\/settings/, (msg) => {
     bot.sendMessage(c, "Use the main menu ( /start ) => ⚙️ Settings.")
   } catch (err) {
     logger.error("/settings command error:", err)
+  }
+})
+
+// /pnl command
+bot.onText(/\/pnl/, async (msg) => {
+  try {
+    const chatId = msg.chat.id
+    clearPendingForSlash(chatId)
+    const u = await getUserRow(chatId)
+    if (!u || !u.public_key) {
+      return bot.sendMessage(chatId, "No wallet found. Please /start => create or import one.")
+    }
+    await showPnL(chatId)
+  } catch (err) {
+    logger.error("/pnl command error:", err)
+    await bot.sendMessage(msg.chat.id, "Error calculating PnL. Please try again.")
   }
 })
 
