@@ -121,8 +121,52 @@ setInterval(logDatabase, 600000) // Log database every 10 minutes
 // A dictionary for "pending" message handlers (by chat) - store the next message callback
 const pendingMessageHandlers = {}
 
-// A dictionary for ephemeral session data (like storing token info so you don't lose it)
+// Enhanced user sessions to track message IDs and flow state
 const userSessions = {}
+
+// Function to get or initialize a user session
+function getSession(chatId) {
+  if (!userSessions[chatId]) {
+    userSessions[chatId] = { 
+      homeMessageId: null,
+      activeMessageId: null, 
+      activeFlow: null,
+      tokenInfo: null,
+      flowData: {},
+      sellTokens: [],
+      sellPage: 0
+    };
+  }
+  return userSessions[chatId];
+}
+
+// Function to return to main menu after completing a flow
+async function returnToMainMenu(chatId) {
+  const session = getSession(chatId);
+  
+  // Clean up the active flow
+  session.activeFlow = null;
+  
+  // If we have a home message ID, refresh it
+  if (session.homeMessageId) {
+    try {
+      await showMainMenu(chatId, session.homeMessageId);
+    } catch (err) {
+      logger.error("Failed to update main menu:", err);
+      // If edit fails, create a new home message
+      const loadingMsg = await bot.sendMessage(chatId, "🔄 Returning to dashboard...", {
+        parse_mode: "Markdown"
+      });
+      await showMainMenu(chatId, loadingMsg.message_id);
+    }
+  } else {
+    // No home message ID stored, create a new one
+    const loadingMsg = await bot.sendMessage(chatId, "🔄 Loading dashboard...", {
+      parse_mode: "Markdown"
+    });
+    await showMainMenu(chatId, loadingMsg.message_id);
+  }
+}
 
 // Clear pending handler for a chat
 function clearPendingMessageHandler(chatId) {
@@ -323,8 +367,8 @@ async function setAutoTrade(id, en) {
   try {
     await new Promise((resolve, reject) => {
       db.run(
-        `
-        UPDATE users
+        
+        `UPDATE users
         SET auto_trade_enabled = ?
         WHERE telegram_id = ? AND is_removed=0
         `,
@@ -344,8 +388,8 @@ async function unlockAutoTrade(id) {
   try {
     await new Promise((resolve, reject) => {
       db.run(
-        `
-        UPDATE users
+        
+        `UPDATE users
         SET auto_trade_unlocked = 1
         WHERE telegram_id = ? AND is_removed=0
         `,
@@ -630,8 +674,10 @@ async function editMessageText(chatId, messageId, t, replyMarkup) {
       reply_markup: replyMarkup,
       disable_web_page_preview: true,
     })
+    return true
   } catch (err) {
     logger.error("editMessageText error:", err.message)
+    return false
   }
 }
 
@@ -647,11 +693,15 @@ async function getOptimalAutoTradeUsd() {
   return v ? new Decimal(v) : new Decimal(50) // Default to 50 SOL if not set
 }
 
-// Show main menu
+// Show main menu - Modified to support editing existing message
 async function showMainMenu(chatId, messageId) {
   try {
     const u = await getUserRow(chatId);
     const solMarketData = await getSolMarketData();
+    const session = getSession(chatId);
+    
+    // Store the message ID as the home message
+    session.homeMessageId = messageId;
     
     let message = ''; // We'll build this differently based on wallet status
     
@@ -704,6 +754,9 @@ async function showMainMenu(chatId, messageId) {
     message += `• 💸 SOL Price: $${solMarketData.currentPrice.toFixed(2)} (24h: ${solMarketData.isUp ? '▲' : '▼'}${solMarketData.priceChange24h}%${solMarketData.isUp ? '📈' : '📉'})\n`;
     message += `• 💹 24h Volume: ${solMarketData.formattedVolume24h}\n\n`;
     
+    // Add timestamp to ensure message always changes when edited (avoids "message not modified" errors)
+    message += `🔄 Last updated: ${new Date().toLocaleTimeString()}\n\n`;
+    
     // Auto-trade status
     const autoTradeStatus = u && u.auto_trade_enabled ? '🟢 ACTIVE' : '🔴 INACTIVE';
     message += `🤖 Autotrade Status: ${autoTradeStatus}`;
@@ -752,7 +805,17 @@ async function showMainMenu(chatId, messageId) {
     }
   } catch (err) {
     logger.error("showMainMenu error:", err);
-    await bot.sendMessage(chatId, "Error loading wallet overview. Please try again.");
+    // If we failed to edit, try sending a new message as fallback
+    try {
+      await bot.sendMessage(chatId, "Error updating menu. Reloading...", { parse_mode: "Markdown" });
+      const loadingMsg = await bot.sendMessage(chatId, "🔄 Loading Solana Memesbot...", {
+        parse_mode: "Markdown"
+      });
+      await showMainMenu(chatId, loadingMsg.message_id);
+    } catch (fallbackErr) {
+      logger.error("showMainMenu fallback error:", fallbackErr);
+      await bot.sendMessage(chatId, "Error loading wallet overview. Please try again.");
+    }
   }
 }
 
@@ -777,20 +840,21 @@ bot.onText(/\/start/, async (msg) => {
       logger.warn("Could not delete message:", e.message);
     }
 
-    // Send loading message first
-    const loadingMsg = await bot.sendMessage(chatId, `🚀 Loading Solana Memesbot...`, {
+    // Always send a new message for /start
+    const loadingMsg = await bot.sendMessage(chatId, "🚀 Loading Solana Memesbot...", {
       parse_mode: "Markdown"
     });
 
-    // Initialize user session
-    userSessions[chatId] = userSessions[chatId] || {};
-    userSessions[chatId].homeMessageId = loadingMsg.message_id;
-
+    // Clear any active flow
+    const session = getSession(chatId);
+    session.activeFlow = null;
+    session.activeMessageId = null;
+    
     await showMainMenu(chatId, loadingMsg.message_id);
     
   } catch (err) {
     logger.error("/start command error:", err);
-    await bot.sendMessage(msg.chat.id, "Error loading wallet data. Please try again.");
+    await bot.sendMessage(chatId, "Error loading wallet data. Please try again.");
   }
 });
 
@@ -811,21 +875,22 @@ bot.onText(/\/home/, async (msg) => {
       logger.warn("Could not delete message:", e.message);
     }
 
-    // Send loading message first
-    const loadingMsg = await bot.sendMessage(chatId, `🔄 Loading wallet overview...`, {
+    // Always send a new message for /home
+    const loadingMsg = await bot.sendMessage(chatId, "🔄 Loading wallet overview...", {
       parse_mode: "Markdown"
     });
 
-    // Initialize or update user session
-    userSessions[chatId] = userSessions[chatId] || {};
-    userSessions[chatId].homeMessageId = loadingMsg.message_id;
+    // Clear any active flow
+    const session = getSession(chatId);
+    session.activeFlow = null;
+    session.activeMessageId = null;
 
     // Always call showMainMenu directly to ensure fresh data
     await showMainMenu(chatId, loadingMsg.message_id);
     
   } catch (err) {
     logger.error("/home command error:", err);
-    await bot.sendMessage(msg.chat.id, "Error loading wallet data. Please try again.");
+    await bot.sendMessage(chatId, "Error loading wallet data. Please try again.");
   }
 });
 
@@ -841,21 +906,23 @@ bot.onText(/\/connect/, async (msg) => {
       return bot.sendMessage(chatId, "You already have a wallet connected. Use /start to see your wallet overview.");
     }
     
-    // Ensure session
-    userSessions[chatId] = userSessions[chatId] || {};
-    
-    // Start the import flow
+    // Start the import flow in a new message thread
     const pm = await bot.sendMessage(chatId, "Please enter your private key to connect your wallet.", {
       reply_markup: {
         inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]],
       },
     });
 
+    // Store this as the active message
+    const session = getSession(chatId);
+    session.activeFlow = "IMPORT_WALLET";
+    session.activeMessageId = pm.message_id;
+
     pendingMessageHandlers[chatId] = async (msg2) => {
       try {
         if (msg2.chat.id !== chatId) return;
         if (!msg2.text) {
-          await bot.sendMessage(chatId, "Invalid input. Import cancelled.", {
+          await editMessageText(chatId, pm.message_id, "Invalid input. Import cancelled.", {
             reply_markup: {
               inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
             },
@@ -869,28 +936,26 @@ bot.onText(/\/connect/, async (msg) => {
           const pubk = kp.publicKey.toBase58();
           await setUserRow(chatId, msg.from.username, pubk, b58);
 
-          // Attempt to delete user message and the prompt
+          // Attempt to delete user message with the private key
           try {
             await bot.deleteMessage(chatId, msg2.message_id);
-            await bot.deleteMessage(chatId, pm.message_id);
           } catch(e) {
             logger.error("deleteMessage error:", e.message);
           }
 
-          await bot.sendMessage(chatId, "✅ Your wallet has been successfully connected!", {
-            parse_mode: "Markdown"
+          // Update the original message to show success
+          await editMessageText(chatId, pm.message_id, "✅ Your wallet has been successfully connected!", {
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Continue", callback_data: "BACK_MAIN" }]],
+            },
           });
 
-          // Show the main menu with updated wallet info
-          const loadingMsg = await bot.sendMessage(chatId, `🔄 Loading wallet...`, {
-            parse_mode: "Markdown"
-          });
-          userSessions[chatId].homeMessageId = loadingMsg.message_id;
-          await showMainMenu(chatId, loadingMsg.message_id);
+          // Return to the main menu
+          await returnToMainMenu(chatId);
           
         } catch(e) {
           logger.error(e);
-          await bot.sendMessage(chatId, "Invalid private key. Please try again.", {
+          await editMessageText(chatId, pm.message_id, "Invalid private key. Please try again.", {
             reply_markup: {
               inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
             },
@@ -904,7 +969,7 @@ bot.onText(/\/connect/, async (msg) => {
     
   } catch (err) {
     logger.error("/connect command error:", err);
-    await bot.sendMessage(msg.chat.id, "Error processing your request. Please try again.");
+    await bot.sendMessage(chatId, "Error processing your request. Please try again.");
   }
 });
 
@@ -914,9 +979,7 @@ bot.onText(/\/connect/, async (msg) => {
 bot.on("callback_query", async (query) => {
   try {
     const c = query.message.chat.id
-    // Get homeMessageId from session
-    userSessions[c] = userSessions[c] || {}
-    const mid = userSessions[c].homeMessageId || query.message.message_id
+    const mid = query.message.message_id
     const d = query.data
 
     // Clear any pending message handler so we don't overlap
@@ -925,6 +988,18 @@ bot.on("callback_query", async (query) => {
 
     const u = await getUserRow(c)
     const cwe = await getConfigValue('create_wallet_enabled')
+    const session = getSession(c);
+
+    // If we have an active flow and this is not related to it or BACK_MAIN, warn user
+    if (session.activeFlow && 
+        !["BACK_MAIN"].includes(d) && 
+        !d.startsWith(session.activeFlow)) {
+      await bot.answerCallbackQuery(query.id, {
+        text: "Please finish the current action first.",
+        show_alert: true
+      });
+      return;
+    }
 
     // If user does not have a wallet (and we want them to import):
     if ((!u || !u.public_key) &&
@@ -955,39 +1030,50 @@ bot.on("callback_query", async (query) => {
       case "IMPORT_WALLET":
         await bot.answerCallbackQuery(query.id)
         {
-          const importText = "Please enter your private key."
-          await editMessageText(c, mid, importText, {
-            inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-          })
+          // Start a new thread for import flow
+          const importMsg = await bot.sendMessage(c, "Please enter your private key to connect your wallet.", {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]],
+            },
+          });
+          
+          // Track this as the active flow message
+          session.activeFlow = "IMPORT_WALLET";
+          session.activeMessageId = importMsg.message_id;
 
           pendingMessageHandlers[c] = async (msg2) => {
             try {
               if (msg2.chat.id !== c) return
               if (!msg2.text) {
-                await editMessageText(c, mid, "Invalid input. Import cancelled.", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, importMsg.message_id, "Invalid input. Import cancelled.", {
+                  reply_markup: {
+                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                  },
+                });
                 return
               }
-              
               const b58 = msg2.text.trim()
               try {
                 const kp = loadKeypairFromSecretBase58(b58)
                 const pubk = kp.publicKey.toBase58()
                 await setUserRow(c, query.from.username, pubk, b58)
 
-                // Attempt to delete user message with private key
+                // Attempt to delete user message with the private key
                 try {
                   await bot.deleteMessage(c, msg2.message_id)
                 } catch(e) {
                   logger.error("deleteMessage error:", e.message)
                 }
 
-                await editMessageText(c, mid, "✅ Your wallet has been successfully imported.\n\nLoading wallet overview...", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                // Update the flow message to show success
+                await editMessageText(c, importMsg.message_id, "✅ Your wallet has been successfully imported.", {
+                  parse_mode: "Markdown",
+                  reply_markup: {
+                    inline_keyboard: [[{ text: "« Continue", callback_data: "BACK_MAIN" }]],
+                  },
+                });
 
-                // Unlock auto-trade if applicable
                 const uu = await getUserRow(c)
                 if (uu && uu.public_key) {
                   const sb = await getSolBalance(uu.public_key)
@@ -996,20 +1082,27 @@ bot.on("callback_query", async (query) => {
                   const minA = await getMinAutoTradeUsd()
                   if (!uu.auto_trade_unlocked && su.gte(minA)) {
                     await unlockAutoTrade(c)
+                    uu.auto_trade_unlocked = 1
                   }
                   
-                  // Show main menu in the same message
-                  await showMainMenu(c, mid)
+                  // Return to main menu
+                  await returnToMainMenu(c);
+                  
                 } else {
-                  await editMessageText(c, mid, "An error occurred. Please try /start again.", {
-                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                  })
+                  // If for some reason we couldn't get the user row
+                  await editMessageText(c, importMsg.message_id, "An error occurred. Please try /start again.", {
+                    reply_markup: {
+                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                    },
+                  });
                 }
               } catch(e) {
                 logger.error(e)
-                await editMessageText(c, mid, "Invalid private key. Import cancelled.", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, importMsg.message_id, "Invalid private key. Import cancelled.", {
+                  reply_markup: {
+                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                  },
+                });
               }
             } catch (err) {
               logger.error("Error in pending message handler (IMPORT_WALLET):", err)
@@ -1027,15 +1120,27 @@ bot.on("callback_query", async (query) => {
       case "CHECK_BAL":
         await bot.answerCallbackQuery(query.id)
         {
+          // Start a new thread for balance check
+          const balMsg = await bot.sendMessage(c, "📊 *Loading positions...*", {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Loading...", callback_data: "BACK_MAIN" }]],
+            },
+          });
+          
+          // Track this as the active flow message
+          session.activeFlow = "CHECK_BAL";
+          session.activeMessageId = balMsg.message_id;
+          
           // *** BALANCE UPGRADE ***
           // We fetch the user's SOL balance, plus aggregator info for each token
           const sb = await getSolBalance(u.public_key)
           const sp = await getSolPriceUSD()
           const su = sb.mul(sp)
 
-          let txt = `📊 *Your Positions*\n\n` +  // Changed from "Wallet Address"
-          `*Wallet:* ${u.public_key}\n\n` +
-          `*SOL Balance:* ${sb.toFixed(4)} SOL (~$${su.toFixed(2)})\n\n`
+          let txt = `📊 *Your Positions*\n\n` + 
+                    `*Wallet:* ${u.public_key}\n\n` +
+                    `*SOL Balance:* ${sb.toFixed(4)} SOL (~$${su.toFixed(2)})\n\n`
 
           // Get all tokens, then fetch aggregator data for each; skip any with no symbol
           const rawTokens = await getAllTokenBalances(u.public_key)
@@ -1073,37 +1178,58 @@ bot.on("callback_query", async (query) => {
             }
           }
 
-          await editMessageText(c, mid, txt, {
-            inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-          })
+          // Update the balance message
+          await editMessageText(c, balMsg.message_id, txt, {
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+            },
+          });
         }
         break
 
       case "BACK_MAIN":
         await bot.answerCallbackQuery(query.id)
-        await showMainMenu(c, mid)
+        session.activeFlow = null;
+        session.activeMessageId = null;
+        await returnToMainMenu(c);
         break
 
       case "SETTINGS_MENU":
         await bot.answerCallbackQuery(query.id)
         {
+          // Start a new thread for settings
+          const settingsMsg = await bot.sendMessage(c, "⚙️ *Loading settings...*", {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Loading...", callback_data: "BACK_MAIN" }]],
+            },
+          });
+          
+          // Track this as the active flow message
+          session.activeFlow = "SETTINGS";
+          session.activeMessageId = settingsMsg.message_id;
+          
           const txt = `⚙️ *Wallet Settings*\n\nManage your wallet preferences and security.`
-          await editMessageText(c, mid, txt, settingsKeyboard())
+          await editMessageText(c, settingsMsg.message_id, txt, settingsKeyboard())
         }
         break
 
       case "REMOVE_WALLET":
         await bot.answerCallbackQuery(query.id)
         {
-          const txt = "⚠️ *Warning* ⚠️\n\nAre you sure you want to remove your wallet from this bot?"
-          await editMessageText(c, mid, txt, {
-            inline_keyboard: [
-              [
-                { text: "✅ Confirm Remove", callback_data: "REMOVE_WALLET_CONFIRM" },
-                { text: "❌ Cancel", callback_data: "SETTINGS_MENU" }
-              ]
-            ]
-          })
+          // Continue in the settings thread
+          session.activeFlow = "SETTINGS_REMOVE";
+          await editMessageText(c, session.activeMessageId, "⚠️ *Warning* ⚠️\n\nAre you sure you want to remove your wallet from this bot?", {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "✅ Confirm Remove", callback_data: "REMOVE_WALLET_CONFIRM" },
+                  { text: "❌ Cancel", callback_data: "SETTINGS_MENU" },
+                ],
+              ],
+            },
+          });
         }
         break
 
@@ -1111,10 +1237,16 @@ bot.on("callback_query", async (query) => {
         await bot.answerCallbackQuery(query.id)
         {
           await removeUserRow(c)
-          const txt = "✅ Your wallet has been removed from the bot."
-          await editMessageText(c, mid, txt, {
-            inline_keyboard: [[{ text: "« Back to Main", callback_data: "BACK_MAIN" }]]
-          })
+          
+          // Update the settings thread message
+          await editMessageText(c, session.activeMessageId, "✅ Your wallet has been removed from the bot.", {
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Back to Main", callback_data: "BACK_MAIN" }]],
+            },
+          });
+          
+          // Return to main menu which will now show the "no wallet" state
+          await returnToMainMenu(c);
         }
         break
 
@@ -1122,11 +1254,12 @@ bot.on("callback_query", async (query) => {
       case "VIEW_PRIVKEY":
         await bot.answerCallbackQuery(query.id)
         {
-          // Security precaution - don't send private key in clear text
-          const txt = "For security reasons, private keys are not displayed here. Please keep your key safe and never share it."
-          await editMessageText(c, mid, txt, {
-            inline_keyboard: [[{ text: "« Back", callback_data: "SETTINGS_MENU" }]]
-          })
+          // Continue in the settings thread
+          await editMessageText(c, session.activeMessageId, "For security reasons, private keys are not displayed here. Please keep your key safe and never share it.", {
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Back", callback_data: "SETTINGS_MENU" }]],
+            },
+          });
         }
         break
 
@@ -1134,8 +1267,20 @@ bot.on("callback_query", async (query) => {
       case "SHOW_HELP":
         await bot.answerCallbackQuery(query.id);
         {
-          const helpMessage = 
-`🚀 *Solana Memesbot Help*  
+          // Start a new thread for help
+          const helpMsg = await bot.sendMessage(c, "❓ *Loading help...*", {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Loading...", callback_data: "BACK_MAIN" }]],
+            },
+          });
+          
+          // Track this as the active flow message
+          session.activeFlow = "HELP";
+          session.activeMessageId = helpMsg.message_id;
+          
+          const helpMessage = `
+🚀 *Solana Memesbot Help*  
 
 🔹 *Getting Started*  
 - Use /start to open the main menu  
@@ -1159,10 +1304,15 @@ bot.on("callback_query", async (query) => {
 - Private keys are *never* displayed/stored in plaintext  
 - Admins will *never* DM first or ask for your key  
 
-*Pro Tip:* Use /buy [mint] or /sell [amount] for quick actions!`;
+*Pro Tip:* Use /buy [mint] or /sell [amount] for quick actions!
+`;
 
-          await editMessageText(c, mid, helpMessage, {
-            inline_keyboard: [[{ text: "« Back to Main", callback_data: "BACK_MAIN" }]]
+          await editMessageText(c, helpMsg.message_id, helpMessage, {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "« Back to Main", callback_data: "BACK_MAIN" }]
+              ]
+            }
           });
         }
         break;
@@ -1170,25 +1320,42 @@ bot.on("callback_query", async (query) => {
       case "AUTO_TRADE":
         await bot.answerCallbackQuery(query.id);
         {
-          const aE = Boolean(u.auto_trade_enabled);
+          // Start a new thread for auto-trade
+          const autoTradeMsg = await bot.sendMessage(c, "🤖 *Loading auto-trade...*", {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Loading...", callback_data: "BACK_MAIN" }]],
+            },
+          });
           
-          if (aE) {
-            const txt = "🤖 *Auto-Trade Status*: 🟢 ACTIVE\n\nWould you like to disable Auto-Trade?"
-            await editMessageText(c, mid, txt, {
-              inline_keyboard: [
-                [{ text: "🔴 Disable Auto-Trade", callback_data: "AUTO_TRADE_OFF" }],
-                [{ text: "🔙 Back to Main", callback_data: "BACK_MAIN" }]
-              ]
-            })
-          } else {
-            const sb2 = await getSolBalance(u.public_key);
-            const minA2 = await getMinAutoTradeUsd();
-            const optimalA2 = await getOptimalAutoTradeUsd();
-            const solPrice = await getSolPriceUSD();
-            const userSolUsd = sb2.mul(solPrice);
+          // Track this as the active flow message
+          session.activeFlow = "AUTO_TRADE";
+          session.activeMessageId = autoTradeMsg.message_id;
+            
+          const aE = Boolean(u.auto_trade_enabled);
+          const sb2 = await getSolBalance(u.public_key);
+          const minA2 = await getMinAutoTradeUsd();
+          const optimalA2 = await getOptimalAutoTradeUsd();
+          const solPrice = await getSolPriceUSD();
+          const userSolUsd = sb2.mul(solPrice);
     
-            const userBalMsg = 
-`🚀 *Auto-Trade Activation*  
+          if (aE) {
+            await editMessageText(c, autoTradeMsg.message_id,
+              "🤖 *Auto-Trade Status*: 🟢 ACTIVE\n\n" +
+              "Would you like to disable Auto-Trade?",
+              {
+                parse_mode: "Markdown",
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: "🔴 Disable Auto-Trade", callback_data: "AUTO_TRADE_OFF" }],
+                    [{ text: "🔙 Back to Main", callback_data: "BACK_MAIN" }],
+                  ],
+                },
+              }
+            );
+          } else {
+            const userBalMsg = `
+🚀 *Auto-Trade Activation*  
 *Current Balance:* ${sb2.toFixed(4)} SOL ($${userSolUsd.toFixed(2)})
                 
 💎 *Beat the snipers*—your wallet gets first access!
@@ -1200,18 +1367,23 @@ bot.on("callback_query", async (query) => {
 💡 *Pro Tip:*
 Higher allocations get *priority access + optimized trade execution*
 
-Enter SOL amount to allocate:`;
-    
-            await editMessageText(c, mid, userBalMsg, {
-              inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
+Enter the amount of SOL to allocate:
+`;
+            await editMessageText(c, autoTradeMsg.message_id, userBalMsg, {
+              parse_mode: "Markdown",
+              reply_markup: {
+                inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]],
+              },
             });
     
             pendingMessageHandlers[c] = async (msg2) => {
               try {
                 if (msg2.chat.id !== c) return;
                 if (!msg2.text) {
-                  await editMessageText(c, mid, "❌ Invalid input. Operation cancelled.", {
-                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
+                  await editMessageText(c, session.activeMessageId, "❌ Invalid input. Operation cancelled.", {
+                    reply_markup: {
+                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                    },
                   });
                   return;
                 }
@@ -1220,42 +1392,52 @@ Enter SOL amount to allocate:`;
                 try {
                   atAmt = new Decimal(msg2.text.trim());
                 } catch {
-                  await editMessageText(c, mid, "❌ Invalid amount. Please enter a valid number.", {
-                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
+                  await editMessageText(c, session.activeMessageId, "❌ Invalid amount. Please enter a valid number.", {
+                    reply_markup: {
+                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                    },
                   });
                   return;
                 }
     
                 const minSol = minA2.div(solPrice);
-                const sb = await getSolBalance(u.public_key);
-                
-                // Try to delete the user's message to keep chat clean
-                try {
-                  await bot.deleteMessage(c, msg2.message_id);
-                } catch(e) {}
-                
                 if (atAmt.lt(minSol)) {
-                  await editMessageText(c, mid, 
+                  await editMessageText(c, session.activeMessageId,
                     `⚠️ Minimum allocation is ${minSol.toFixed(4)} SOL ($${minA2.toFixed(2)}).`,
-                    { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] }
+                    {
+                      parse_mode: "Markdown",
+                      reply_markup: {
+                        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                      },
+                    }
                   );
                   return;
                 }
                 
-                if (atAmt.gt(sb)) {
-                  await editMessageText(c, mid,
-                    `❌ Insufficient balance! You only have ${sb.toFixed(4)} SOL available.`,
-                    { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] }
+                if (atAmt.gt(sb2)) {
+                  await editMessageText(c, session.activeMessageId,
+                    `❌ Insufficient balance! You only have ${sb2.toFixed(4)} SOL available.`,
+                    {
+                      parse_mode: "Markdown",
+                      reply_markup: {
+                        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                      },
+                    }
                   );
                   return;
                 }
                 
                 await setAutoTrade(c, true);
-                await editMessageText(c, mid,
+                await editMessageText(c, session.activeMessageId,
                   `🎉 *Auto-Trade Activated!* 🟢\n\n` +
                   `✅ *Allocated:* ${atAmt.toFixed(4)} SOL ($${atAmt.mul(solPrice).toFixed(2)})\n` +
                   `✨ *You now have priority access to new launches!*`,
-                  { inline_keyboard: [[{ text: "« Back to Dashboard", callback_data: "BACK_MAIN" }]] }
+                  {
+                    parse_mode: "Markdown",
+                    reply_markup: {
+                      inline_keyboard: [[{ text: "« Back to Dashboard", callback_data: "BACK_MAIN" }]],
+                    },
+                  }
                 );
               } catch (err) {
                 logger.error("Error in pending message handler (AUTO_TRADE):", err);
@@ -1269,100 +1451,126 @@ Enter SOL amount to allocate:`;
       case "AUTO_TRADE_OFF":
         await bot.answerCallbackQuery(query.id)
         await setAutoTrade(c, false)
-        await editMessageText(c, mid, "Auto-Trade turned OFF 🔴", {
-          inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-        })
+        
+        // Update the auto-trade thread message
+        await editMessageText(c, session.activeMessageId, "Auto-Trade turned OFF 🔴", {
+          reply_markup: {
+            inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+          },
+        });
+        
+        // Return to main menu
+        await returnToMainMenu(c);
         break
 
       case "WITHDRAW_MENU":
         await bot.answerCallbackQuery(query.id)
         {
-          await editMessageText(c, mid, "Enter recipient Solana address:", {
-            inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-          })
+          // Start a new thread for withdraw
+          const withdrawMsg = await bot.sendMessage(c, "💸 *Withdraw*\n\nEnter recipient Solana address:", {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]],
+            },
+          });
+          
+          // Track this as the active flow message
+          session.activeFlow = "WITHDRAW";
+          session.activeMessageId = withdrawMsg.message_id;
 
           pendingMessageHandlers[c] = async (m2) => {
             try {
               if (m2.chat.id !== c) return
               if (!m2.text) {
-                await editMessageText(c, mid, "Invalid address. Cancelled.", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, session.activeMessageId, "Invalid address. Cancelled.", {
+                  reply_markup: {
+                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                  },
+                });
                 return
               }
-              
               const address = m2.text.trim()
-              
-              // Try to delete the user message
-              try {
-                await bot.deleteMessage(c, m2.message_id);
-              } catch(e) {}
-              
               if (address.length !== 44) {
-                await editMessageText(c, mid, "Invalid address. Cancelled.", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, session.activeMessageId, "Invalid address. Cancelled.", {
+                  reply_markup: {
+                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                  },
+                });
                 return
               }
               
-              await editMessageText(c, mid, "Enter SOL amount to withdraw:", {
-                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-              })
+              // Save the address in the session and update the message to ask for amount
+              session.flowData.withdrawAddress = address;
+              await editMessageText(c, session.activeMessageId, `💸 *Withdraw*\n\nRecipient: ${address}\n\nEnter SOL amount to withdraw:`, {
+                parse_mode: "Markdown",
+                reply_markup: {
+                  inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]],
+                },
+              });
 
               pendingMessageHandlers[c] = async (m3) => {
                 try {
                   if (m3.chat.id !== c) return
                   if (!m3.text) {
-                    await editMessageText(c, mid, "Invalid amount. Cancelled.", {
-                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                    })
+                    await editMessageText(c, session.activeMessageId, "Invalid amount. Cancelled.", {
+                      reply_markup: {
+                        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                      },
+                    });
                     return
                   }
-                  
-                  // Try to delete the user message
-                  try {
-                    await bot.deleteMessage(c, m3.message_id);
-                  } catch(e) {}
-                  
                   let amt
                   try {
                     amt = new Decimal(m3.text.trim())
                     if (amt.lte(0)) {
-                      await editMessageText(c, mid, "Must be > 0. Cancelled.", {
-                        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                      })
+                      await editMessageText(c, session.activeMessageId, "Must be > 0. Cancelled.", {
+                        reply_markup: {
+                          inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                        },
+                      });
                       return
                     }
                   } catch {
-                    await editMessageText(c, mid, "Invalid amount. Cancelled.", {
-                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                    })
+                    await editMessageText(c, session.activeMessageId, "Invalid amount. Cancelled.", {
+                      reply_markup: {
+                        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                      },
+                    });
                     return
                   }
-                  
                   const sb = await getSolBalance(u.public_key)
                   if (amt.gt(sb)) {
-                    await editMessageText(c, mid, "Insufficient SOL. You have " + sb.toFixed(4), {
-                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                    })
+                    await editMessageText(c, session.activeMessageId, "Insufficient SOL. You have " + sb.toFixed(4), {
+                      reply_markup: {
+                        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                      },
+                    });
                     return
                   }
                   
-                  await editMessageText(c, mid, "Processing your withdrawal...", {
-                    inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
-                  })
+                  // Update message to show processing
+                  await editMessageText(c, session.activeMessageId, `💸 *Withdraw*\n\nProcessing your withdrawal of ${amt.toFixed(4)} SOL to:\n${session.flowData.withdrawAddress}\n\nPlease wait...`, {
+                    parse_mode: "Markdown"
+                  });
                   
                   const uk = loadKeypairFromSecretBase58(u.private_key)
-                  const txSig = await withdrawSol(uk, address, amt.toNumber())
-                  
+                  const txSig = await withdrawSol(uk, session.flowData.withdrawAddress, amt.toNumber())
                   if (txSig) {
-                    await editMessageText(c, mid, `*Withdrawal Successful!*\nTX: [View in Explorer](https://solscan.io/tx/${txSig})`, {
-                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                    })
+                    await editMessageText(c, session.activeMessageId, `*Withdrawal Successful!*\nTX: [View in Explorer](https://solscan.io/tx/${txSig})`, {
+                      parse_mode: "Markdown",
+                      reply_markup: {
+                        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                      },
+                    });
+                    
+                    // After successful withdrawal, go back to main menu
+                    await returnToMainMenu(c);
                   } else {
-                    await editMessageText(c, mid, "Withdrawal failed due to transaction error.", {
-                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                    })
+                    await editMessageText(c, session.activeMessageId, "Withdrawal failed due to transaction error.", {
+                      reply_markup: {
+                        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                      },
+                    });
                   }
                 } catch (err) {
                   logger.error("Error in pending message handler (WITHDRAW_MENU amt):", err)
@@ -1380,51 +1588,51 @@ Enter SOL amount to allocate:`;
       case "BUY_MENU":
         await bot.answerCallbackQuery(query.id)
         {
-          // Make sure we have a session object for this user
-          userSessions[c] = userSessions[c] || {}
-          userSessions[c].tokenInfo = null
-
-          // Show user balance here so they know how much SOL they have before picking a token
-          const userSolBal = await getSolBalance(u.public_key)
-          const buyPrompt = `Your SOL Balance: *${userSolBal.toFixed(4)} SOL*\nEnter token symbol or address to buy:`
+          // Start a new thread for the buy flow
+          const userSolBal = await getSolBalance(u.public_key);
+          const buyMsg = await bot.sendMessage(c, `Your SOL Balance: *${userSolBal.toFixed(4)} SOL*\nEnter token symbol or address to buy:`, {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]],
+            },
+          });
           
-          await editMessageText(c, mid, buyPrompt, {
-            inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-          })
+          // Track this as the active flow message
+          session.activeFlow = "BUY";
+          session.activeMessageId = buyMsg.message_id;
+          session.tokenInfo = null;
 
           pendingMessageHandlers[c] = async (m2) => {
             try {
               if (m2.chat.id !== c) return
               const mint = m2.text ? m2.text.trim() : ""
-              
-              // Try to delete user message
-              try {
-                await bot.deleteMessage(c, m2.message_id);
-              } catch (e) {}
-              
               if (!mint || mint.length < 3) {
-                await editMessageText(c, mid, "Invalid mint/symbol. Cancelled.", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, session.activeMessageId, "Invalid mint/symbol. Cancelled.", {
+                  reply_markup: {
+                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                  },
+                });
                 return
               }
-
-              // Show loading state
-              await editMessageText(c, mid, "🔍 Looking up token information...", {
-                inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
-              })
+              
+              // Update the message to show loading
+              await editMessageText(c, session.activeMessageId, `Searching for token ${mint}...\nPlease wait...`, {
+                parse_mode: "Markdown"
+              });
 
               // Fetch extended data from DexScreener
               const info = await getTokenInfoFromAggregator(mint)
               if (!info) {
-                await editMessageText(c, mid, "Token not found on DexScreener. Cancelled.", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, session.activeMessageId, "Token not found on DexScreener. Cancelled.", {
+                  reply_markup: {
+                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                  },
+                });
                 return
               }
 
               // Store in userSessions
-              userSessions[c].tokenInfo = info
+              session.tokenInfo = info
 
               // Construct informational text
               const explorerLink = `https://solscan.io/account/${info.mint}`
@@ -1450,8 +1658,7 @@ ${mcLine}
 ${piLine}
 
 ${wBalanceLine}
-
-Buy ${info.symbol} token:`;
+`
 
               // Present inline keyboard
               const buyKeyboard = {
@@ -1473,7 +1680,11 @@ Buy ${info.symbol} token:`;
                 ],
               }
 
-              await editMessageText(c, mid, msgText, buyKeyboard)
+              await editMessageText(c, session.activeMessageId, msgText, {
+                parse_mode: "Markdown",
+                reply_markup: buyKeyboard,
+                disable_web_page_preview: false,
+              });
             } catch (err) {
               logger.error("Error in pending message handler (BUY_MENU mint):", err)
             }
@@ -1483,98 +1694,94 @@ Buy ${info.symbol} token:`;
         break
 
       case "BUY_TOKEN_CANCEL":
-        await bot.answerCallbackQuery(query.id, { text: "Cancelled." })
-        await showMainMenu(c, mid)
+        await bot.answerCallbackQuery(query.id, { text: "Cancelled." });
+        await returnToMainMenu(c);
         break
 
       case "BUY_TOKEN_SWAP":
         await bot.answerCallbackQuery(query.id)
         {
-          const infoObj = userSessions[c] && userSessions[c].tokenInfo
+          const infoObj = session.tokenInfo
           if (!infoObj) {
-            await editMessageText(c, mid, "Token info not found in session. Please try again.", {
-              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-            })
+            await editMessageText(c, session.activeMessageId, "Token info not found in session. Please try again.", {
+              reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+            });
             return
           }
           
-          await editMessageText(c, mid, `Enter the *from token mint* (or 'So1111...' if SOL) you want to swap *into* ${infoObj.mint}:`, {
-            inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-          })
+          await editMessageText(c, session.activeMessageId, `Enter the *from token mint* (or 'So1111...' if SOL) you want to swap *into* ${infoObj.mint}:`, {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+            },
+          });
 
           clearPendingMessageHandler(c)
           pendingMessageHandlers[c] = async (msg2) => {
             try {
               if (msg2.chat.id !== c) return
               const fromMint = msg2.text ? msg2.text.trim() : ""
-              
-              // Try to delete user message
-              try {
-                await bot.deleteMessage(c, msg2.message_id);
-              } catch (e) {}
-              
               if (!fromMint || fromMint.length < 3) {
-                await editMessageText(c, mid, "Invalid from-mint. Swap cancelled.", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, session.activeMessageId, "Invalid from-mint. Swap cancelled.", {
+                  reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+                });
                 return
               }
-              
-              userSessions[c].swapFromMint = fromMint
+              session.flowData.swapFromMint = fromMint;
 
               // Step 2: Ask how much from-token
-              await editMessageText(c, mid, `How much of that token do you want to swap into ${infoObj.symbol}?`, {
-                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-              })
+              await editMessageText(c, session.activeMessageId, `How much of that token do you want to swap into ${infoObj.symbol}?`, {
+                parse_mode: "Markdown",
+                reply_markup: {
+                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                },
+              });
 
               clearPendingMessageHandler(c)
               pendingMessageHandlers[c] = async (msg3) => {
                 try {
                   if (msg3.chat.id !== c) return
-                  
-                  // Try to delete user message
-                  try {
-                    await bot.deleteMessage(c, msg3.message_id);
-                  } catch (e) {}
-                  
                   let amt
                   try {
                     amt = new Decimal(msg3.text.trim())
                   } catch(e) {
-                    await editMessageText(c, mid, "Invalid number. Cancelled.", {
-                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                    })
+                    await editMessageText(c, session.activeMessageId, "Invalid number. Cancelled.", {
+                      reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+                    });
                     return
                   }
-                  
                   if (amt.lte(0)) {
-                    await editMessageText(c, mid, "Amount must be > 0. Cancelled.", {
-                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                    })
+                    await editMessageText(c, session.activeMessageId, "Amount must be > 0. Cancelled.", {
+                      reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+                    });
                     return
                   }
 
-                  await editMessageText(c, mid, `Swapping ${amt.toFixed(4)} of ${userSessions[c].swapFromMint} into ${infoObj.mint}...`, {
-                    inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
-                  })
+                  // Update to show processing
+                  await editMessageText(c, session.activeMessageId, `Swapping ${amt.toFixed(4)} of ${session.flowData.swapFromMint} into ${infoObj.mint}...\nPlease wait...`, {
+                    parse_mode: "Markdown"
+                  });
                   
                   const kp = loadKeypairFromSecretBase58(u.private_key)
                   const txid = await performSwap({
                     userKeypair: kp,
-                    fromTokenMint: userSessions[c].swapFromMint,
+                    fromTokenMint: session.flowData.swapFromMint,
                     toTokenMint: infoObj.mint,
                     amount: amt.toNumber(),
                     slippage: DEFAULT_SLIPPAGE,
                   })
-                  
                   if (txid) {
-                    await editMessageText(c, mid, `*Swap Successful!*\nTX: [View in Explorer](https://solscan.io/tx/${txid})`, {
-                      inline_keyboard: [[{ text: "« Back to Dashboard", callback_data: "BACK_MAIN" }]]
-                    })
+                    await editMessageText(c, session.activeMessageId, `*Swap Successful!*\nTX: [View in Explorer](https://solscan.io/tx/${txid})`, {
+                      parse_mode: "Markdown",
+                      reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+                    });
+                    
+                    // Return to main menu after swap
+                    await returnToMainMenu(c);
                   } else {
-                    await editMessageText(c, mid, "Swap failed (no route or aggregator error).", {
-                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                    })
+                    await editMessageText(c, session.activeMessageId, "Swap failed (no route or aggregator error).", {
+                      reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+                    });
                   }
                 } catch (err) {
                   logger.error("Error in pending message handler (BUY_TOKEN_SWAP amount):", err)
@@ -1593,27 +1800,26 @@ Buy ${info.symbol} token:`;
       case "BUY_TOKEN_5":
         await bot.answerCallbackQuery(query.id, { text: "Processing buy..." })
         {
-          const infoObj = userSessions[c] && userSessions[c].tokenInfo
+          const infoObj = session.tokenInfo
           if (!infoObj) {
-            await editMessageText(c, mid, "Token info not found in session. Please try again.", {
-              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-            })
+            await editMessageText(c, session.activeMessageId, "Token info not found in session. Please try again.", {
+              reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+            });
             return
           }
-          
           let solAmt = d === "BUY_TOKEN_1" ? new Decimal(1) : new Decimal(5)
           const userSolBal = await getSolBalance(u.public_key)
-          
           if (solAmt.gt(userSolBal)) {
-            await editMessageText(c, mid, "Insufficient SOL. You have " + userSolBal.toFixed(4) + ".", {
-              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-            })
+            await editMessageText(c, session.activeMessageId, "Insufficient SOL. You have " + userSolBal.toFixed(4) + ".", {
+              reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+            });
             return
           }
           
-          await editMessageText(c, mid, `Buying ${solAmt.toFixed(1)} SOL worth of ${infoObj.symbol}...`, {
-            inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
-          })
+          // Update to show processing
+          await editMessageText(c, session.activeMessageId, `Buying ${solAmt.toFixed(1)} SOL worth of ${infoObj.symbol}...\nPlease wait...`, {
+            parse_mode: "Markdown"
+          });
           
           const kp = loadKeypairFromSecretBase58(u.private_key)
           const fromMint = "So11111111111111111111111111111111111111112"
@@ -1624,15 +1830,18 @@ Buy ${info.symbol} token:`;
             amount: solAmt.toNumber(),
             slippage: DEFAULT_SLIPPAGE,
           })
-          
           if (txid) {
-            await editMessageText(c, mid, `*Buy Successful!*\nTX: [View in Explorer](https://solscan.io/tx/${txid})`, {
-              inline_keyboard: [[{ text: "« Back to Dashboard", callback_data: "BACK_MAIN" }]]
-            })
+            await editMessageText(c, session.activeMessageId, `*Buy Successful!*\nTX: [View in Explorer](https://solscan.io/tx/${txid})`, {
+              parse_mode: "Markdown",
+              reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+            });
+            
+            // Return to main menu after buy
+            await returnToMainMenu(c);
           } else {
-            await editMessageText(c, mid, "Buy failed (no route or aggregator error).", {
-              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-            })
+            await editMessageText(c, session.activeMessageId, "Buy failed (no route or aggregator error).", {
+              reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+            });
           }
         }
         break
@@ -1640,65 +1849,60 @@ Buy ${info.symbol} token:`;
       case "BUY_TOKEN_X":
         await bot.answerCallbackQuery(query.id, { text: "Enter the SOL amount..." })
         {
-          const infoObj = userSessions[c] && userSessions[c].tokenInfo
+          const infoObj = session.tokenInfo
           if (!infoObj) {
-            await editMessageText(c, mid, "Token info not found in session. Please try again.", {
-              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-            })
+            await editMessageText(c, session.activeMessageId, "Token info not found in session. Please try again.", {
+              reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+            });
             return
           }
-          
           const userSolBal = await getSolBalance(u.public_key)
-          await editMessageText(c, mid, `Your current SOL balance is *${userSolBal.toFixed(4)} SOL*.\nEnter SOL amount to use:`, {
-            inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-          })
+          const askMsg = `Your current SOL balance is *${userSolBal.toFixed(4)} SOL*.\nEnter SOL amount to buy ${infoObj.symbol}:`
+          await editMessageText(c, session.activeMessageId, askMsg, {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+            },
+          });
 
           pendingMessageHandlers[c] = async (m2) => {
             try {
               if (m2.chat.id !== c) return
-              
-              // Try to delete user message
-              try {
-                await bot.deleteMessage(c, m2.message_id);
-              } catch (e) {}
-              
               if (!m2.text) {
-                await editMessageText(c, mid, "Invalid amount. Cancelled.", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, session.activeMessageId, "Invalid amount. Cancelled.", {
+                  reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+                });
                 return
               }
-              
               let amt
               try {
                 amt = new Decimal(m2.text.trim())
               } catch(e) {
-                await editMessageText(c, mid, "Invalid number. Cancelled.", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, session.activeMessageId, "Invalid number. Cancelled.", {
+                  reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+                });
                 return
               }
-              
               if (amt.lte(0)) {
-                await editMessageText(c, mid, "Amount must be > 0. Cancelled.", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, session.activeMessageId, "Amount must be > 0. Cancelled.", {
+                  reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+                });
                 return
               }
-              
               const userBal = await getSolBalance(u.public_key)
               if (amt.gt(userBal)) {
-                await editMessageText(c, mid, `Insufficient balance. You only have ${userBal.toFixed(4)} SOL. Cancelled.`, {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, session.activeMessageId, `Insufficient balance. You only have ${userBal.toFixed(4)} SOL. Cancelled.`, {
+                  reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+                });
                 return
               }
               
-              // Perform swap
-              await editMessageText(c, mid, `Buying ${amt.toFixed(4)} SOL worth of ${infoObj.symbol}...`, {
-                inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
-              })
+              // Update to show processing
+              await editMessageText(c, session.activeMessageId, `Buying ${amt.toFixed(4)} SOL worth of ${infoObj.symbol}...\nPlease wait...`, {
+                parse_mode: "Markdown"
+              });
               
+              // Perform swap
               const kp = loadKeypairFromSecretBase58(u.private_key)
               const fromMint = "So11111111111111111111111111111111111111112"
               const txid = await performSwap({
@@ -1708,15 +1912,18 @@ Buy ${info.symbol} token:`;
                 amount: amt.toNumber(),
                 slippage: DEFAULT_SLIPPAGE,
               })
-              
               if (txid) {
-                await editMessageText(c, mid, `*Buy Successful!*\nTX: [View in Explorer](https://solscan.io/tx/${txid})`, {
-                  inline_keyboard: [[{ text: "« Back to Dashboard", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, session.activeMessageId, `*Buy Successful!*\nTX: [View in Explorer](https://solscan.io/tx/${txid})`, {
+                  parse_mode: "Markdown",
+                  reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+                });
+                
+                // Return to main menu after buy
+                await returnToMainMenu(c);
               } else {
-                await editMessageText(c, mid, "Buy failed (no route or aggregator error).", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                })
+                await editMessageText(c, session.activeMessageId, "Buy failed (no route or aggregator error).", {
+                  reply_markup: { inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]] },
+                });
               }
             } catch (err) {
               logger.error("Error in pending message handler (BUY_TOKEN_X amount):", err)
@@ -1730,25 +1937,31 @@ Buy ${info.symbol} token:`;
       case "SELL_MENU":
         await bot.answerCallbackQuery(query.id)
         {
-          userSessions[c] = userSessions[c] || {}
+          // Start a new thread for the sell flow
+          const sellMsg = await bot.sendMessage(c, "💱 *Loading your tokens...*\nPlease wait...", {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]],
+            },
+          });
           
-          // Show loading message
-          await editMessageText(c, mid, "Loading your tokens...", {
-            inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
-          })
+          // Track this as the active flow message
+          session.activeFlow = "SELL";
+          session.activeMessageId = sellMsg.message_id;
           
-          // We'll fetch all user tokens, do aggregator calls, skip those that have no symbol/price
+          // Get token data
           const bal2 = await getAllTokenBalances(u.public_key)
           const solPrice = await getSolPriceUSD()
           // Filter out SOL pseudo mint and 0 balances
           const nonSolTokens = bal2.filter(t => 
             t.mint !== "So11111111111111111111111111111111111111112" && t.amount.gt(0)
           )
-          
           if (!nonSolTokens.length) {
-            await editMessageText(c, mid, "You do not have any tokens yet! Start trading in the Buy menu.", {
-              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-            })
+            await editMessageText(c, sellMsg.message_id, "You do not have any tokens yet! Start trading in the Buy menu.", {
+              reply_markup: {
+                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+              },
+            });
             return
           }
 
@@ -1772,17 +1985,20 @@ Buy ${info.symbol} token:`;
           }))
 
           if (!tokenSellList.length) {
-            await editMessageText(c, mid, "No known tokens to sell. (Aggregator info not found for your tokens.)", {
-              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-            })
+            await editMessageText(c, sellMsg.message_id, "No known tokens to sell. (Aggregator info not found for your tokens.)", {
+              reply_markup: {
+                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+              },
+            });
             return
           }
 
-          // We'll store them in userSessions with pagination
-          userSessions[c].sellTokens = tokenSellList
-          userSessions[c].sellPage = 0
+          // Store in session
+          session.sellTokens = tokenSellList;
+          session.sellPage = 0;
 
-          await showSellTokensList(c, mid) // function will take messageId param now
+          // Show the token list
+          await showSellTokensList(c, sellMsg.message_id);
         }
         break
 
@@ -1790,26 +2006,26 @@ Buy ${info.symbol} token:`;
       case "SELL_PAGE_NEXT":
         await bot.answerCallbackQuery(query.id)
         {
-          userSessions[c].sellPage = (userSessions[c].sellPage || 0) + 1
-          await showSellTokensList(c, mid)
+          session.sellPage = (session.sellPage || 0) + 1;
+          await showSellTokensList(c, session.activeMessageId);
         }
         break
 
       case "SELL_PAGE_PREV":
         await bot.answerCallbackQuery(query.id)
         {
-          userSessions[c].sellPage = Math.max((userSessions[c].sellPage || 0) - 1, 0)
-          await showSellTokensList(c, mid)
+          session.sellPage = Math.max((session.sellPage || 0) - 1, 0);
+          await showSellTokensList(c, session.activeMessageId);
         }
         break
 
       case "SELL_PAGE_REFRESH":
         await bot.answerCallbackQuery(query.id, { text: "Refreshing..." })
         {
-          // Show loading message
-          await editMessageText(c, mid, "Refreshing token list...", {
-            inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
-          })
+          // Update message to show loading
+          await editMessageText(c, session.activeMessageId, "💱 *Refreshing token list...*\nPlease wait...", {
+            parse_mode: "Markdown"
+          });
           
           // Re-fetch aggregator data from scratch
           const bal2 = await getAllTokenBalances(u.public_key)
@@ -1834,14 +2050,16 @@ Buy ${info.symbol} token:`;
               chartLink: `https://dexscreener.com/solana/${t.mint}`
             })
           }))
-          userSessions[c].sellTokens = newList
-          userSessions[c].sellPage = 0
+          session.sellTokens = newList
+          session.sellPage = 0
           if (!newList.length) {
-            await editMessageText(c, mid, "No known tokens to sell after refresh.", {
-              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-            })
+            await editMessageText(c, session.activeMessageId, "No known tokens to sell after refresh.", {
+              reply_markup: {
+                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+              },
+            });
           } else {
-            await showSellTokensList(c, mid)
+            await showSellTokensList(c, session.activeMessageId);
           }
         }
         break
@@ -1852,20 +2070,23 @@ Buy ${info.symbol} token:`;
           await bot.answerCallbackQuery(query.id)
           {
             const idx = parseInt(d.replace("SELL_TOKEN_INDEX_",""),10)
-            const list = userSessions[c]?.sellTokens || []
+            const list = session.sellTokens || []
             if (!list[idx]) {
-              await editMessageText(c, mid, "Token index not found. Please refresh the list.", {
-                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-              })
+              await editMessageText(c, session.activeMessageId, "Token index not found. Please refresh the list.", {
+                reply_markup: {
+                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                },
+              });
               return
             }
             // Show user the details, ask how much they want to sell
             const tk = list[idx]
             const sb = await getSolBalance(u.public_key)
             const userSolBalUsd = sb.mul(await getSolPriceUSD())
-            // Example message:
-            const sellMsg =
-`*Select a token to sell* (${list.length} total)
+            
+            // Update message to show token details and ask for amount
+            const sellMsg = `
+*Select a token to sell* (${list.length} total)
 *Balance:* ${sb.toFixed(4)} SOL (${userSolBalUsd.toFixed(2)})
 
 [**🄲 ${tk.symbol}**](${tk.chartLink})
@@ -1873,62 +2094,79 @@ Token Balance: ${tk.tokenBalance.toFixed(tk.decimals)}
 In SOL: ${tk.solValue.toFixed(4)} SOL
 In USD: ${tk.usdValue.toFixed(2)}
 
-How many *${tk.symbol}* do you want to sell?`
+How many *${tk.symbol}* do you want to sell?
+`;
 
-            await editMessageText(c, mid, sellMsg, {
-              inline_keyboard: [[{ text: "« Back", callback_data: "SELL_MENU" }]]
-            })
+            await editMessageText(c, session.activeMessageId, sellMsg, {
+              parse_mode: "Markdown",
+              disable_web_page_preview: false,
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "« Back", callback_data: "SELL_MENU" }],
+                ],
+              },
+            });
+
+            // Store the token index in the session
+            session.flowData.sellTokenIndex = idx;
 
             // Wait for user to enter amount
             pendingMessageHandlers[c] = async (m2) => {
               try {
                 if (m2.chat.id !== c) return
-                
-                // Try to delete user message
-                try {
-                  await bot.deleteMessage(c, m2.message_id);
-                } catch (e) {}
-                
                 if (!m2.text) {
-                  await editMessageText(c, mid, "Invalid amount. Cancelled.", {
-                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                  })
+                  await editMessageText(c, session.activeMessageId, "Invalid amount. Cancelled.", {
+                    reply_markup: {
+                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                    },
+                  });
                   return
                 }
-                
                 let sAmt
                 try {
                   sAmt = new Decimal(m2.text.trim())
                   if (sAmt.lte(0)) {
-                    await editMessageText(c, mid, "Amount must be > 0. Cancelled.", {
-                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                    })
+                    await editMessageText(c, session.activeMessageId, "Amount must be > 0. Cancelled.", {
+                      reply_markup: {
+                        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                      },
+                    });
                     return
                   }
                 } catch {
-                  await editMessageText(c, mid, "Invalid amount. Cancelled.", {
-                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                  })
+                  await editMessageText(c, session.activeMessageId, "Invalid amount. Cancelled.", {
+                    reply_markup: {
+                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                    },
+                  });
                   return
                 }
 
                 if (sAmt.gt(tk.tokenBalance)) {
-                  await editMessageText(c, mid, `Insufficient tokens. You only have ${tk.tokenBalance.toFixed(tk.decimals)}.`, {
-                    inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                  })
+                  await editMessageText(c, session.activeMessageId, `Insufficient tokens. You only have ${tk.tokenBalance.toFixed(tk.decimals)}.`, {
+                    reply_markup: {
+                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                    },
+                  });
                   return
                 }
 
+                // Store the amount in the session
+                session.flowData.sellAmount = sAmt.toString();
+
                 // Next: ask user to proceed or cancel
                 const confirmTxt = `You are about to sell *${sAmt.toFixed(tk.decimals)}* of ${tk.symbol}.\nProceed to convert to SOL?`
-                await editMessageText(c, mid, confirmTxt, {
-                  inline_keyboard: [
-                    [
-                      { text: "Proceed", callback_data: `SELL_PROCEED_${idx}_${sAmt.toString()}` },
-                      { text: "Cancel", callback_data: "SELL_MENU" },
+                await editMessageText(c, session.activeMessageId, confirmTxt, {
+                  parse_mode: "Markdown",
+                  reply_markup: {
+                    inline_keyboard: [
+                      [
+                        { text: "✅ Proceed", callback_data: `SELL_PROCEED_${idx}_${sAmt.toString()}` },
+                        { text: "❌ Cancel", callback_data: "SELL_MENU" },
+                      ],
                     ],
-                  ],
-                })
+                  },
+                });
               } catch (err) {
                 logger.error("Error in pending message handler (SELL_TOKEN_INDEX_...):", err)
               }
@@ -1945,28 +2183,34 @@ How many *${tk.symbol}* do you want to sell?`
             const idx = parseInt(parts[2],10)
             const rawAmt = parts[3]
             const amt = new Decimal(rawAmt || "0")
-            const list = userSessions[c]?.sellTokens || []
+            const list = session.sellTokens || []
             if (!list[idx]) {
-              await editMessageText(c, mid, "Token index not found. Please refresh the list.", {
-                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-              })
+              await editMessageText(c, session.activeMessageId, "Token index not found. Please refresh the list.", {
+                reply_markup: {
+                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                },
+              });
               return
             }
             const tk = list[idx]
+            
+            // Update message to show processing
+            await editMessageText(c, session.activeMessageId, `💱 *Selling Token*\n\nProcessing sale of ${amt.toFixed(tk.decimals)} ${tk.symbol}...\nPlease wait...`, {
+              parse_mode: "Markdown"
+            });
+            
             // Double-check user balance
             const bals = await getAllTokenBalances(u.public_key)
             const fTok = bals.find((b) => b.mint === tk.mint)
             if (!fTok || fTok.amount.lt(amt)) {
-              await editMessageText(c, mid, "Insufficient tokens at the time of sell. Sell cancelled.", {
-                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-              })
+              await editMessageText(c, session.activeMessageId, "Insufficient tokens at the time of sell. Sell cancelled.", {
+                reply_markup: {
+                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                },
+              });
               return
             }
             
-            await editMessageText(c, mid, "Processing your sell order...", {
-              inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
-            })
-
             const kp = loadKeypairFromSecretBase58(u.private_key)
             const toSolMint = "So11111111111111111111111111111111111111112"
             const txid = await performSwap({
@@ -1976,15 +2220,22 @@ How many *${tk.symbol}* do you want to sell?`
               amount: amt.toNumber(),
               slippage: DEFAULT_SLIPPAGE,
             })
-            
             if (txid) {
-              await editMessageText(c, mid, `*Sell Successful!*\nTX: [View in Explorer](https://solscan.io/tx/${txid})`, {
-                inline_keyboard: [[{ text: "« Back to Dashboard", callback_data: "BACK_MAIN" }]]
-              })
+              await editMessageText(c, session.activeMessageId, `*Sell Successful!*\nTX: [View in Explorer](https://solscan.io/tx/${txid})`, {
+                parse_mode: "Markdown",
+                reply_markup: {
+                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                },
+              });
+              
+              // Return to main menu after successful sell
+              await returnToMainMenu(c);
             } else {
-              await editMessageText(c, mid, "Sell failed (aggregator error or no route).", {
-                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-              })
+              await editMessageText(c, session.activeMessageId, "Sell failed (aggregator error or no route).", {
+                reply_markup: {
+                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                },
+              });
             }
           }
         }
@@ -2009,13 +2260,13 @@ How many *${tk.symbol}* do you want to sell?`
 
 // ---------------------------------------------------------
 // Helper to show SELL tokens list (pagination up to 6 tokens)
-// *** SELL UPGRADE *** function
+// *** SELL UPGRADE *** function - Modified to accept messageId for editing
 // ---------------------------------------------------------
 async function showSellTokensList(chatId, messageId) {
   try {
     const u = await getUserRow(chatId)
     if (!u) return
-    const userData = userSessions[chatId]
+    const userData = getSession(chatId)
     if (!userData || !userData.sellTokens) return
 
     const tokens = userData.sellTokens
@@ -2064,12 +2315,21 @@ async function showSellTokensList(chatId, messageId) {
       { text: "« Back", callback_data: "BACK_MAIN" },
     ])
 
-    await editMessageText(chatId, messageId, txt, { inline_keyboard: inlineKb })
+    // Now we edit the existing message instead of sending a new one
+    await editMessageText(chatId, messageId, txt, {
+      parse_mode: "Markdown",
+      disable_web_page_preview: false,
+      reply_markup: {
+        inline_keyboard: inlineKb
+      },
+    });
   } catch (err) {
     logger.error("showSellTokensList error:", err)
     await editMessageText(chatId, messageId, "Error displaying token list. Please try again or /start.", {
-      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-    })
+      reply_markup: {
+        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+      },
+    });
   }
 }
 
@@ -2093,8 +2353,8 @@ bot.onText(/\/help/, async (msg) => {
     const chatId = msg.chat.id;
     clearPendingForSlash(chatId);
     
-    const helpMessage = 
-`🚀 *Solana Memesbot Help*  
+    const helpMessage = `
+🚀 *Solana Memesbot Help*  
 
 🔹 *Getting Started*  
 - Use /start to open the main menu  
@@ -2121,8 +2381,7 @@ bot.onText(/\/help/, async (msg) => {
 *Pro Tip:* Use /buy [mint] or /sell [amount] for quick actions!
 `;
 
-// Create a new message for help, but store it so we can navigate back to main
-    const helpMsg = await bot.sendMessage(chatId, helpMessage, {
+    await bot.sendMessage(chatId, helpMessage, {
       parse_mode: "Markdown",
       disable_web_page_preview: true,
       reply_markup: {
@@ -2131,14 +2390,10 @@ bot.onText(/\/help/, async (msg) => {
         ]
       }
     });
-    
-    // Store the message ID in the user session so we can navigate back properly
-    userSessions[chatId] = userSessions[chatId] || {};
-    userSessions[chatId].homeMessageId = helpMsg.message_id;
 
   } catch (err) {
     logger.error("/help command error:", err);
-    await bot.sendMessage(msg.chat.id, "Error loading help information. Please try again.");
+    await bot.sendMessage(chatId, "Error loading help information. Please try again.");
   }
 });
 
@@ -2147,32 +2402,11 @@ bot.onText(/\/positions/, async (msg) => {
   try {
     const c = msg.chat.id
     clearPendingForSlash(c)
-    
-    // Delete the command message
-    try {
-      if (msg.message_id) {
-        await bot.deleteMessage(c, msg.message_id).catch(() => {});
-      }
-    } catch(e) {}
-    
     const u = await getUserRow(c)
     if (!u || !u.public_key) {
-      const noWalletMsg = await bot.sendMessage(c, "No wallet found. Please /start => create or import one.")
-      userSessions[c] = userSessions[c] || {};
-      userSessions[c].homeMessageId = noWalletMsg.message_id;
-      return
+      return bot.sendMessage(c, "No wallet found. Please /start => create or import one.")
     }
-    
-    // Send loading message
-    const loadingMsg = await bot.sendMessage(c, "📊 Loading your positions...", {
-      parse_mode: "Markdown"
-    });
-
-    // Store the message ID so callback queries can update this message
-    userSessions[c] = userSessions[c] || {};
-    userSessions[c].homeMessageId = loadingMsg.message_id;
-
-    // *** BALANCE UPGRADE (same as CHECK_BAL block) ***
+// *** BALANCE UPGRADE (same as CHECK_BAL block) ***
     const sb = await getSolBalance(u.public_key)
     const sp = await getSolPriceUSD()
     const su = sb.mul(sp)
@@ -2210,467 +2444,53 @@ bot.onText(/\/positions/, async (msg) => {
       }
     }
 
-    await editMessageText(c, loadingMsg.message_id, txt, {
-      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-    });
+    bot.sendMessage(c, txt, { parse_mode: "Markdown" })
   } catch (err) {
-    logger.error("/positions command error:", err)
-    await bot.sendMessage(msg.chat.id, "Error loading positions. Please try again.")
+    logger.error("/balances command error:", err)
   }
 })
 
 // /buy
-bot.onText(/\/buy/, async (msg) => {
+bot.onText(/\/buy/, (msg) => {
   try {
     const c = msg.chat.id
     clearPendingForSlash(c)
-    
-    // Delete the command message
-    try {
-      if (msg.message_id) {
-        await bot.deleteMessage(c, msg.message_id).catch(() => {});
-      }
-    } catch(e) {}
-    
-    // Send a new message that will be our main interface
-    const buyMsg = await bot.sendMessage(c, "🔄 Loading buy menu...", {
-      parse_mode: "Markdown"
-    });
-    
-    // Store the message ID so callback queries can update this message
-    userSessions[c] = userSessions[c] || {};
-    userSessions[c].homeMessageId = buyMsg.message_id;
-    
-    // Trigger the buy flow
-    await bot.answerCallbackQuery({ callback_query_id: "" }).catch(() => {});
-    
-    const u = await getUserRow(c)
-    if (!u || !u.public_key) {
-      await editMessageText(c, buyMsg.message_id, "No wallet found. Please /start => create or import one.", {
-        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-      });
-      return
-    }
-    
-    // Make sure we have a session object for this user
-    userSessions[c].tokenInfo = null
-
-    // Show user balance here so they know how much SOL they have before picking a token
-    const userSolBal = await getSolBalance(u.public_key)
-    const buyPrompt = `Your SOL Balance: *${userSolBal.toFixed(4)} SOL*\nEnter token symbol or address to buy:`
-    
-    await editMessageText(c, buyMsg.message_id, buyPrompt, {
-      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-    });
-
-    pendingMessageHandlers[c] = async (m2) => {
-      try {
-        if (m2.chat.id !== c) return
-        const mint = m2.text ? m2.text.trim() : ""
-        
-        // Try to delete user message
-        try {
-          await bot.deleteMessage(c, m2.message_id);
-        } catch (e) {}
-        
-        if (!mint || mint.length < 3) {
-          await editMessageText(c, buyMsg.message_id, "Invalid mint/symbol. Cancelled.", {
-            inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-          });
-          return
-        }
-
-        // Show loading state
-        await editMessageText(c, buyMsg.message_id, "🔍 Looking up token information...", {
-          inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
-        });
-
-        // Fetch extended data from DexScreener
-        const info = await getTokenInfoFromAggregator(mint)
-        if (!info) {
-          await editMessageText(c, buyMsg.message_id, "Token not found on DexScreener. Cancelled.", {
-            inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-          });
-          return
-        }
-
-        // Store in userSessions
-        userSessions[c].tokenInfo = info
-
-        // Construct informational text
-        const explorerLink = `https://solscan.io/account/${info.mint}`
-        const chartLink = `https://dexscreener.com/solana/${info.mint}`
-        const scanLink = `https://t.me/RickBurpBot?start=${info.mint}` // example
-        const symbolLine = `${info.name || "Unknown"} | ${info.symbol || "???"} | ${info.mint}`
-        const lineLinks = `[Explorer](${explorerLink}) | [Chart](${chartLink}) | [Scan](${scanLink})`
-        const priceLine = `*Price:* $${new Decimal(info.price || 0).toFixed(8)}`
-        const changesLine = `5m: ${info.m5}%, 1h: ${info.h1}%, 6h: ${info.h6}%, 24h: ${info.h24}%`
-        const mcLine = `*Market Cap:* $${new Decimal(info.marketCap || 0).toFixed(2)}`
-        const piLine = `*Price Impact:* N/A`
-        const userSol = await getSolBalance(u.public_key)
-        const wBalanceLine = `*Wallet Balance:* ${userSol.toFixed(4)} SOL`
-
-        const msgText =
-`${symbolLine}
-${lineLinks}
-
-${priceLine}
-${changesLine}
-${mcLine}
-
-${piLine}
-
-${wBalanceLine}
-
-Buy ${info.symbol} token:`;
-
-        // Present inline keyboard
-        const buyKeyboard = {
-          inline_keyboard: [
-            [
-              { text: "Cancel", callback_data: "BUY_TOKEN_CANCEL" },
-              { text: "Swap ✅", callback_data: "BUY_TOKEN_SWAP" },
-            ],
-            [
-              { text: "Buy 1.0 SOL", callback_data: "BUY_TOKEN_1" },
-              { text: "Buy 5.0 SOL", callback_data: "BUY_TOKEN_5" },
-            ],
-            [
-              { text: "Buy X SOL", callback_data: "BUY_TOKEN_X" },
-            ],
-            [
-              { text: "« Back", callback_data: "BACK_MAIN" },
-            ],
-          ],
-        };
-
-        await editMessageText(c, buyMsg.message_id, msgText, buyKeyboard);
-      } catch (err) {
-        logger.error("Error in pending message handler (/buy):", err);
-      }
-    };
-    bot.once("message", pendingMessageHandlers[c]);
+    bot.sendMessage(c, "Use the main menu ( /start ) => 💹 Buy.")
   } catch (err) {
-    logger.error("/buy command error:", err);
-    await bot.sendMessage(msg.chat.id, "Error loading buy menu. Please try again.");
+    logger.error("/buy command error:", err)
   }
 })
 
 // /sell
-bot.onText(/\/sell/, async (msg) => {
+bot.onText(/\/sell/, (msg) => {
   try {
     const c = msg.chat.id
     clearPendingForSlash(c)
-    
-    // Delete the command message
-    try {
-      if (msg.message_id) {
-        await bot.deleteMessage(c, msg.message_id).catch(() => {});
-      }
-    } catch(e) {}
-    
-    // Send a new message that will be our main interface
-    const sellMsg = await bot.sendMessage(c, "🔄 Loading sell menu...", {
-      parse_mode: "Markdown"
-    });
-    
-    // Store the message ID so callback queries can update this message
-    userSessions[c] = userSessions[c] || {};
-    userSessions[c].homeMessageId = sellMsg.message_id;
-    
-    // Trigger the sell flow like a callback
-    await bot.answerCallbackQuery({ callback_query_id: "" }).catch(() => {});
-    
-    const u = await getUserRow(c)
-    if (!u || !u.public_key) {
-      await editMessageText(c, sellMsg.message_id, "No wallet found. Please /start => create or import one.", {
-        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-      });
-      return
-    }
-    
-    userSessions[c] = userSessions[c] || {};
-    
-    // Show loading message
-    await editMessageText(c, sellMsg.message_id, "Loading your tokens...", {
-      inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
-    });
-    
-    // We'll fetch all user tokens, do aggregator calls, skip those that have no symbol/price
-    const bal2 = await getAllTokenBalances(u.public_key)
-    const solPrice = await getSolPriceUSD()
-    // Filter out SOL pseudo mint and 0 balances
-    const nonSolTokens = bal2.filter(t => 
-      t.mint !== "So11111111111111111111111111111111111111112" && t.amount.gt(0)
-    )
-    
-    if (!nonSolTokens.length) {
-      await editMessageText(c, sellMsg.message_id, "You do not have any tokens yet! Start trading in the Buy menu.", {
-        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-      });
-      return
-    }
-
-    // Get aggregator data for each token
-    const tokenSellList = []
-    await Promise.all(nonSolTokens.map(async (t) => {
-      const info = await getTokenInfoFromAggregator(t.mint)
-      if (!info || !info.symbol || !info.symbol.trim() || info.price <= 0) return
-      const tokenUsdPrice = new Decimal(info.price)
-      const tokenUsdBal = t.amount.mul(tokenUsdPrice)
-      const tokenSolBal = tokenUsdBal.div(solPrice)
-      tokenSellList.push({
-        mint: t.mint,
-        symbol: info.symbol,
-        decimals: t.decimals,
-        tokenBalance: t.amount,
-        usdValue: tokenUsdBal,
-        solValue: tokenSolBal,
-        chartLink: `https://dexscreener.com/solana/${t.mint}`
-      })
-    }))
-
-    if (!tokenSellList.length) {
-      await editMessageText(c, sellMsg.message_id, "No known tokens to sell. (Aggregator info not found for your tokens.)", {
-        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-      });
-      return
-    }
-
-    // We'll store them in userSessions with pagination
-    userSessions[c].sellTokens = tokenSellList
-    userSessions[c].sellPage = 0
-
-    // Call the helper function to show the tokens with the sellMsg.message_id
-    await showSellTokensList(c, sellMsg.message_id);
+    bot.sendMessage(c, "Use the main menu ( /start ) => 💱 Sell.")
   } catch (err) {
-    logger.error("/sell command error:", err);
-    await bot.sendMessage(msg.chat.id, "Error loading sell menu. Please try again.");
+    logger.error("/sell command error:", err)
   }
 })
 
 // /withdraw
-bot.onText(/\/withdraw/, async (msg) => {
+bot.onText(/\/withdraw/, (msg) => {
   try {
     const c = msg.chat.id
     clearPendingForSlash(c)
-    
-    // Delete the command message
-    try {
-      if (msg.message_id) {
-        await bot.deleteMessage(c, msg.message_id).catch(() => {});
-      }
-    } catch(e) {}
-    
-    // Send a new message that will be our main interface
-    const withdrawMsg = await bot.sendMessage(c, "🔄 Loading withdraw menu...", {
-      parse_mode: "Markdown"
-    });
-    
-    // Store the message ID so callback queries can update this message
-    userSessions[c] = userSessions[c] || {};
-    userSessions[c].homeMessageId = withdrawMsg.message_id;
-    
-    const u = await getUserRow(c)
-    if (!u || !u.public_key) {
-      await editMessageText(c, withdrawMsg.message_id, "No wallet found. Please /start => create or import one.", {
-        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-      });
-      return
-    }
-    
-    // Show current balance
-    const balance = await getSolBalance(u.public_key);
-    await editMessageText(c, withdrawMsg.message_id, `Your SOL Balance: *${balance.toFixed(4)} SOL*\n\nEnter recipient Solana address:`, {
-      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-    });
-
-    pendingMessageHandlers[c] = async (m2) => {
-      try {
-        if (m2.chat.id !== c) return
-        if (!m2.text) {
-          await editMessageText(c, withdrawMsg.message_id, "Invalid address. Cancelled.", {
-            inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-          });
-          return
-        }
-        
-        const address = m2.text.trim();
-        
-        // Try to delete the user message
-        try {
-          await bot.deleteMessage(c, m2.message_id);
-        } catch(e) {}
-        
-        if (address.length !== 44) {
-          await editMessageText(c, withdrawMsg.message_id, "Invalid address. Cancelled.", {
-            inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-          });
-          return
-        }
-        
-        // Show user's current balance when asking for amount
-        const currentBalance = await getSolBalance(u.public_key);
-        await editMessageText(c, withdrawMsg.message_id, `Your SOL Balance: *${currentBalance.toFixed(4)} SOL*\n\nEnter SOL amount to withdraw:`, {
-          inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-        });
-
-        pendingMessageHandlers[c] = async (m3) => {
-          try {
-            if (m3.chat.id !== c) return
-            if (!m3.text) {
-              await editMessageText(c, withdrawMsg.message_id, "Invalid amount. Cancelled.", {
-                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-              });
-              return
-            }
-            
-            // Try to delete the user message
-            try {
-              await bot.deleteMessage(c, m3.message_id);
-            } catch(e) {}
-            
-            let amt
-            try {
-              amt = new Decimal(m3.text.trim())
-              if (amt.lte(0)) {
-                await editMessageText(c, withdrawMsg.message_id, "Must be > 0. Cancelled.", {
-                  inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-                });
-                return
-              }
-            } catch {
-              await editMessageText(c, withdrawMsg.message_id, "Invalid amount. Cancelled.", {
-                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-              });
-              return
-            }
-            
-            const sb = await getSolBalance(u.public_key)
-            if (amt.gt(sb)) {
-              await editMessageText(c, withdrawMsg.message_id, "Insufficient SOL. You have " + sb.toFixed(4), {
-                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-              });
-              return
-            }
-            
-            // Show confirmation
-            const confirmationTxt = `You are about to withdraw *${amt.toFixed(4)} SOL* to address:\n\`${address}\`\n\nDo you want to proceed?`;
-            await editMessageText(c, withdrawMsg.message_id, confirmationTxt, {
-              inline_keyboard: [
-                [
-                  { text: "✅ Confirm", callback_data: "CONFIRM_WITHDRAW" },
-                  { text: "❌ Cancel", callback_data: "BACK_MAIN" },
-                ],
-              ]
-            });
-            
-            // Store withdrawal details in session
-            userSessions[c].withdrawAddress = address;
-            userSessions[c].withdrawAmount = amt.toNumber();
-          } catch (err) {
-            logger.error("Error in pending message handler (WITHDRAW amount):", err);
-          }
-        };
-        bot.once("message", pendingMessageHandlers[c]);
-      } catch (err) {
-        logger.error("Error in pending message handler (WITHDRAW address):", err);
-      }
-    };
-    bot.once("message", pendingMessageHandlers[c]);
+    bot.sendMessage(c, "Use the main menu ( /start ) => 💸 Withdraw.")
   } catch (err) {
-    logger.error("/withdraw command error:", err);
-    await bot.sendMessage(msg.chat.id, "Error loading withdraw menu. Please try again.");
+    logger.error("/withdraw command error:", err)
   }
 })
 
-// Handle the withdraw confirmation
-bot.on("callback_query", async (query) => {
-  if (query.data === "CONFIRM_WITHDRAW") {
-    try {
-      const c = query.message.chat.id;
-      const mid = userSessions[c]?.homeMessageId || query.message.message_id;
-      await bot.answerCallbackQuery(query.id);
-      
-      const u = await getUserRow(c);
-      if (!u || !u.public_key) {
-        await editMessageText(c, mid, "No wallet found. Please /start => create or import one.", {
-          inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-        });
-        return;
-      }
-      
-      const address = userSessions[c]?.withdrawAddress;
-      const amount = userSessions[c]?.withdrawAmount;
-      
-      if (!address || !amount) {
-        await editMessageText(c, mid, "Missing withdrawal details. Please try again.", {
-          inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-        });
-        return;
-      }
-      
-      await editMessageText(c, mid, "Processing your withdrawal...", {
-        inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]]
-      });
-      
-      const uk = loadKeypairFromSecretBase58(u.private_key);
-      const txSig = await withdrawSol(uk, address, amount);
-      
-      if (txSig) {
-        await editMessageText(c, mid, `*Withdrawal Successful!*\nTX: [View in Explorer](https://solscan.io/tx/${txSig})`, {
-          inline_keyboard: [[{ text: "« Back to Dashboard", callback_data: "BACK_MAIN" }]]
-        });
-      } else {
-        await editMessageText(c, mid, "Withdrawal failed due to transaction error.", {
-          inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-        });
-      }
-      
-      // Clear withdrawal data
-      delete userSessions[c].withdrawAddress;
-      delete userSessions[c].withdrawAmount;
-    } catch (err) {
-      logger.error("CONFIRM_WITHDRAW callback error:", err);
-    }
-  }
-});
-
 // /settings
-bot.onText(/\/settings/, async (msg) => {
+bot.onText(/\/settings/, (msg) => {
   try {
     const c = msg.chat.id
     clearPendingForSlash(c)
-    
-    // Delete the command message
-    try {
-      if (msg.message_id) {
-        await bot.deleteMessage(c, msg.message_id).catch(() => {});
-      }
-    } catch(e) {}
-    
-    // Send a new message with settings menu
-    const settingsMsg = await bot.sendMessage(c, "⚙️ Loading settings menu...", {
-      parse_mode: "Markdown"
-    });
-    
-    // Store the message ID so callback queries can update this message
-    userSessions[c] = userSessions[c] || {};
-    userSessions[c].homeMessageId = settingsMsg.message_id;
-    
-    const u = await getUserRow(c)
-    if (!u || !u.public_key) {
-      await editMessageText(c, settingsMsg.message_id, "No wallet found. Please /start => create or import one.", {
-        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]]
-      });
-      return
-    }
-    
-    const txt = `⚙️ *Wallet Settings*\n\nManage your wallet preferences and security.`
-    await editMessageText(c, settingsMsg.message_id, txt, settingsKeyboard());
+    bot.sendMessage(c, "Use the main menu ( /start ) => ⚙️ Settings.")
   } catch (err) {
-    logger.error("/settings command error:", err);
-    await bot.sendMessage(msg.chat.id, "Error loading settings menu. Please try again.");
+    logger.error("/settings command error:", err)
   }
 })
 
