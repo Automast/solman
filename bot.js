@@ -76,6 +76,7 @@ const DB_PATH = "bot_database.db"
 const DEFAULT_SLIPPAGE = 1
 const BOT_TOKEN =
   "8159028692:AAHcccHrkyolMK1S8XzL-sEErnQgHn7CGlw" // Hard-coded as in original
+  const HELIUS_API_KEY = process.env.HELIUS_API_KEY || "YOUR_HELIUS_API_KEY_HERE" // Get a free key from https://helius.xyz
 
 // Initialize main Telegram bot
 bot = new TelegramBot(BOT_TOKEN, { polling: true })
@@ -569,7 +570,6 @@ async function withdrawSol(u, toAddr, amt) {
   }
 }
 
-// Main menu keyboard
 function mainMenuKeyboard(autoTradeEnabled) {
   const e = autoTradeEnabled ? "🟢" : "🔴"
   return {
@@ -587,11 +587,11 @@ function mainMenuKeyboard(autoTradeEnabled) {
         { text: "💸 Withdraw", callback_data: "WITHDRAW_MENU" },
       ],
       [
-        { text: "📈 PNL", callback_data: "PNL_MENU" },
-        { text: "⚙️ Settings", callback_data: "SETTINGS_MENU" },
+        { text: "📈 PnL", callback_data: "PNL_MENU" },
+        { text: "❓ Help", callback_data: "SHOW_HELP" },
       ],
       [
-        { text: "❓ Help", callback_data: "SHOW_HELP" },
+        { text: "⚙️ Settings", callback_data: "SETTINGS_MENU" },
       ],
     ],
   }
@@ -615,29 +615,6 @@ function settingsKeyboard() {
       [
         { text: "🔑 View Private Key", callback_data: "VIEW_PRIVKEY" },
         { text: "🗑 Remove Wallet", callback_data: "REMOVE_WALLET" },
-      ],
-      [
-        { text: "« Back", callback_data: "BACK_MAIN" },
-      ],
-    ],
-  }
-}
-
-// PNL time period selection keyboard
-function pnlTimeframeKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        { text: "24 Hours", callback_data: "PNL_24H" },
-        { text: "3 Days", callback_data: "PNL_3D" },
-      ],
-      [
-        { text: "7 Days", callback_data: "PNL_7D" },
-        { text: "1 Month", callback_data: "PNL_1M" },
-      ],
-      [
-        { text: "1 Year", callback_data: "PNL_1Y" },
-        { text: "All Time", callback_data: "PNL_ALL" },
       ],
       [
         { text: "« Back", callback_data: "BACK_MAIN" },
@@ -752,7 +729,10 @@ async function showMainMenu(chatId, messageId) {
             { text: "💸 Withdraw", callback_data: "WITHDRAW_MENU" },
           ],
           [
+            { text: "📈 PnL", callback_data: "PNL_MENU" },
             { text: "❓ Help", callback_data: "SHOW_HELP" },
+          ],
+          [
             { text: "⚙️ Settings", callback_data: "SETTINGS_MENU" },
           ],
           [
@@ -816,6 +796,19 @@ bot.onText(/\/start/, async (msg) => {
   }
 });
 
+// /pnl
+bot.onText(/\/pnl/, (msg) => {
+  try {
+    const c = msg.chat.id
+    clearPendingForSlash(c)
+    const loadingMsg = bot.sendMessage(c, "Loading PnL calculator...", { parse_mode: "Markdown" })
+      .then(msg => {
+        showPnLMenu(c, msg.message_id)
+      })
+  } catch (err) {
+    logger.error("/pnl command error:", err)
+  }
+})
 
 // Home command - Fixed to match /start behavior
 bot.onText(/\/home/, async (msg) => {
@@ -964,6 +957,33 @@ bot.on("callback_query", async (query) => {
         }
         break
 
+        case "PNL_MENU":
+  await bot.answerCallbackQuery(query.id)
+  await showPnLMenu(c, mid)
+  break
+
+case "PNL_PERIOD_24h":
+case "PNL_PERIOD_3d":
+case "PNL_PERIOD_7d":
+case "PNL_PERIOD_1m":
+case "PNL_PERIOD_1y":
+  await bot.answerCallbackQuery(query.id, { text: "Calculating..." })
+  {
+    const period = d.replace("PNL_PERIOD_", "")
+    await processPnL(c, period)
+  }
+  break
+
+case "PNL_FILTER_all":
+case "PNL_FILTER_trade":
+case "PNL_FILTER_transfer":
+  await bot.answerCallbackQuery(query.id)
+  {
+    const filter = d.replace("PNL_FILTER_", "")
+    await applyPnLFilter(c, mid, filter)
+  }
+  break
+
       case "IMPORT_WALLET":
         await bot.answerCallbackQuery(query.id)
         {
@@ -1109,52 +1129,6 @@ bot.on("callback_query", async (query) => {
         }
         break
 
-        case "PNL_MENU":
-  await bot.answerCallbackQuery(query.id)
-  {
-    const txt = `📈 *Profit and Loss Analysis*\n\nSelect a time period to view your trading performance:`
-    await editMessageText(c, mid, txt, pnlTimeframeKeyboard())
-  }
-  break
-
-  case "PNL_24H":
-    case "PNL_3D":
-    case "PNL_7D":
-    case "PNL_1M": 
-    case "PNL_1Y":
-    case "PNL_ALL":
-      await bot.answerCallbackQuery(query.id, { text: "Calculating PNL..." })
-      {
-        // Map callback data to period string
-        const periodMap = {
-          "PNL_24H": "24h",
-          "PNL_3D": "3d",
-          "PNL_7D": "7d",
-          "PNL_1M": "1m",
-          "PNL_1Y": "1y",
-          "PNL_ALL": "all"
-        }
-        
-        const period = periodMap[d]
-        
-        // Display loading message
-        await editMessageText(c, mid, "📊 *Calculating PNL*\n\nAnalyzing your trading history. This may take a moment...", {
-          inline_keyboard: [
-            [{ text: "« Back", callback_data: "PNL_MENU" }]
-          ]
-        })
-        
-        // Calculate PNL for the selected period
-        const pnlData = await calculatePNL(u.public_key, period)
-        
-        // Add wallet address to the PNL data for links
-        pnlData.walletAddress = u.public_key
-        
-        // Display the results
-        await displayPNL(c, pnlData)
-      }
-      break
-
       case "BACK_MAIN":
         await bot.answerCallbackQuery(query.id)
         await showMainMenu(c, mid)
@@ -1217,32 +1191,60 @@ bot.on("callback_query", async (query) => {
         await bot.answerCallbackQuery(query.id);
         {
           const helpMessage = `
+
 🚀 *Solana Memesbot Help*  
 
+
+
 🔹 *Getting Started*  
+
 - Use /start to open the main menu  
+
 - Connect a wallet via *Import Wallet* (private key)  
+
 - Check balances with /positions  
 
+
+
 💡 *Key Features*  
+
 - *💹 Buy Tokens*: Swap SOL → any SPL token (enter mint address)  
+
 - *💱 Sell Tokens*: Swap SPL tokens → SOL (auto-detects holdings)  
+
 - *🤖 Auto-Trade*: Allocate SOL for priority access to new launches  
+
 - *💸 Withdraw*: Send SOL to external wallets  
 
+- *📈 PnL Analysis*: Track your trading performance and profits
+
+
+
 ⚠️ *Trading Tips*  
+
 - Default slippage: 1% 
+
 - Failed swap? Check:  
+
 - Enough SOL for gas + amount  
+
 - Valid token mint address  
+
 - Slippage too low for volatile tokens  
 
+
+
 🔒 *Security*  
+
 - Private keys are *never* displayed/stored in plaintext  
+
 - Admins will *never* DM first or ask for your key  
 
+
+
 *Pro Tip:* Use /buy [mint] or /sell [amount] for quick actions!
-      `;
+
+`;
 
           await bot.sendMessage(c, helpMessage, {
             parse_mode: "Markdown",
@@ -2175,638 +2177,6 @@ async function showSellTokensList(chatId) {
 }
 
 // ---------------------------------------------------------
-// Helper functions for PNL calculations
-// ---------------------------------------------------------
-
-// Get timestamp for a specific time period ago
-function getTimestampForPeriod(period) {
-  const now = new Date()
-  let timestamp
-  
-  switch(period) {
-    case "24h":
-      timestamp = Math.floor(now.setHours(now.getHours() - 24) / 1000)
-      break
-    case "3d":
-      timestamp = Math.floor(now.setDate(now.getDate() - 3) / 1000)
-      break
-    case "7d":
-      timestamp = Math.floor(now.setDate(now.getDate() - 7) / 1000)
-      break
-    case "1m":
-      timestamp = Math.floor(now.setMonth(now.getMonth() - 1) / 1000)
-      break
-    case "1y":
-      timestamp = Math.floor(now.setFullYear(now.getFullYear() - 1) / 1000)
-      break
-    default: // All time
-      timestamp = 0
-  }
-  
-  return timestamp
-}
-
-// Format percentage with +/- sign and emoji
-function formatPercentage(percentage) {
-  if (percentage > 0) {
-    return `+${percentage.toFixed(2)}% 📈`
-  } else if (percentage < 0) {
-    return `${percentage.toFixed(2)}% 📉`
-  } else {
-    return `0.00% ↔️`
-  }
-}
-
-// Fetch transaction history for wallet from Solana blockchain
-async function getTransactionHistory(pubkeyStr, startTime) {
-  try {
-    const c = new Connection(SOLANA_RPC_URL, "confirmed")
-    const pubkey = new PublicKey(pubkeyStr)
-    
-    // Get confirmed signatures for address
-    const signatures = await c.getSignaturesForAddress(
-      pubkey, 
-      { 
-        limit: 100,
-        until: startTime ? new Signature(startTime) : undefined, 
-      }
-    )
-    
-    // Filter transactions after the start time if specified
-    const filteredSignatures = startTime 
-      ? signatures.filter(sig => sig.blockTime >= startTime) 
-      : signatures
-
-    // Get transaction details
-    const transactions = []
-    for (const sig of filteredSignatures) {
-      try {
-        const tx = await c.getTransaction(sig.signature, { commitment: "confirmed" })
-        if (tx) {
-          transactions.push({
-            signature: sig.signature,
-            blockTime: sig.blockTime,
-            transaction: tx,
-          })
-        }
-      } catch (err) {
-        logger.error(`Error fetching transaction details for ${sig.signature}:`, err)
-      }
-    }
-    
-    return transactions
-  } catch (err) {
-    logger.error("Error fetching transaction history:", err)
-    return []
-  }
-}
-
-// Parse transactions to identify trades for PNL calculation
-async function calculatePNL(pubkeyStr, period) {
-  try {
-    // Convert period to timestamp
-    const startTimestamp = getTimestampForPeriod(period)
-    
-    // Initialize tracking variables
-    let totalProfit = new Decimal(0)
-    let totalLoss = new Decimal(0)
-    let totalFees = new Decimal(0)
-    let winningTrades = 0
-    let losingTrades = 0
-    let tradeDetails = []
-    
-    // Get current SOL price for USD calculations
-    const currentSolPrice = await getSolPriceUSD()
-    
-    // Track token balances by mint address
-    const tokenTracker = {}
-    
-    try {
-      // Connect to Solana
-      const connection = new Connection(SOLANA_RPC_URL, "confirmed")
-      const publicKey = new PublicKey(pubkeyStr)
-      
-      // Get transaction signatures (most recent first)
-      const signatures = await connection.getSignaturesForAddress(
-        publicKey,
-        { limit: 100 }
-      )
-      
-      // Filter by time period if needed
-      const filteredSignatures = startTimestamp > 0 
-        ? signatures.filter(sig => sig.blockTime && sig.blockTime >= startTimestamp)
-        : signatures
-      
-      logger.info(`Found ${filteredSignatures.length} transactions for PNL analysis`)
-      
-      // Process each transaction
-      for (const sigInfo of filteredSignatures) {
-        if (sigInfo.err) continue // Skip failed transactions
-        
-        try {
-          // Get full transaction data
-          const txData = await connection.getTransaction(
-            sigInfo.signature,
-            { commitment: "confirmed", maxSupportedTransactionVersion: 0 }
-          )
-          
-          if (!txData || !txData.meta) continue
-          
-          // Track transaction fee
-          totalFees = totalFees.add(new Decimal(txData.meta.fee).div(1_000_000_000))
-          
-          // Check if this is a swap transaction by looking at token balance changes
-          if (txData.meta.preTokenBalances && txData.meta.postTokenBalances) {
-            const preBalances = txData.meta.preTokenBalances
-            const postBalances = txData.meta.postTokenBalances
-            
-            // Map wallet token accounts to balances for easier lookup
-            const preBalanceMap = {}
-            const postBalanceMap = {}
-            
-            // Only include the user's token accounts
-            for (const balance of preBalances) {
-              if (balance.owner === pubkeyStr) {
-                preBalanceMap[balance.mint] = new Decimal(
-                  balance.uiTokenAmount.uiAmount || 0
-                )
-              }
-            }
-            
-            for (const balance of postBalances) {
-              if (balance.owner === pubkeyStr) {
-                postBalanceMap[balance.mint] = new Decimal(
-                  balance.uiTokenAmount.uiAmount || 0
-                )
-              }
-            }
-            
-            // Find tokens whose balance changed
-            const allMints = new Set([
-              ...Object.keys(preBalanceMap),
-              ...Object.keys(postBalanceMap)
-            ])
-            
-            // Track which tokens increased/decreased
-            const increaseTokens = []
-            const decreaseTokens = []
-            
-            for (const mint of allMints) {
-              const preBal = preBalanceMap[mint] || new Decimal(0)
-              const postBal = postBalanceMap[mint] || new Decimal(0)
-              const change = postBal.minus(preBal)
-              
-              // Skip SOL pseudo token for now
-              if (mint === "So11111111111111111111111111111111111111112") {
-                continue
-              }
-              
-              if (change.gt(0)) {
-                increaseTokens.push({
-                  mint,
-                  amount: change
-                })
-              } else if (change.lt(0)) {
-                decreaseTokens.push({
-                  mint,
-                  amount: change.abs()
-                })
-              }
-            }
-            
-            // Now check for SOL balance changes
-            const solMint = "So11111111111111111111111111111111111111112"
-            const preSolBal = preBalanceMap[solMint] || new Decimal(0)
-            const postSolBal = postBalanceMap[solMint] || new Decimal(0)
-            const solChange = postSolBal.minus(preSolBal)
-            
-            // Simple heuristic for swaps - one token's balance increases while another decreases
-            
-            // Case 1: SOL → Token (BUY)
-            if (solChange.lt(0) && increaseTokens.length === 1) {
-              const boughtToken = increaseTokens[0]
-              const soldAmount = solChange.abs()
-              
-              // Initialize token tracking if needed
-              if (!tokenTracker[boughtToken.mint]) {
-                tokenTracker[boughtToken.mint] = {
-                  totalBought: new Decimal(0),
-                  totalSold: new Decimal(0),
-                  totalSpentSol: new Decimal(0),
-                  totalReceivedSol: new Decimal(0),
-                  averageBuyPrice: new Decimal(0),
-                  symbol: "Unknown"
-                }
-                
-                // Try to get token info
-                try {
-                  const tokenInfo = await getTokenInfoFromAggregator(boughtToken.mint)
-                  if (tokenInfo && tokenInfo.symbol) {
-                    tokenTracker[boughtToken.mint].symbol = tokenInfo.symbol
-                  }
-                } catch (err) {
-                  logger.error(`Error getting token info for ${boughtToken.mint}:`, err)
-                }
-              }
-              
-              // Update token tracking
-              const tracker = tokenTracker[boughtToken.mint]
-              const oldTotal = tracker.totalBought
-              const oldSpent = tracker.totalSpentSol
-              
-              tracker.totalBought = tracker.totalBought.add(boughtToken.amount)
-              tracker.totalSpentSol = tracker.totalSpentSol.add(soldAmount)
-              
-              // Update average buy price
-              if (tracker.totalBought.gt(0)) {
-                tracker.averageBuyPrice = tracker.totalSpentSol.div(tracker.totalBought)
-              }
-              
-              tradeDetails.push({
-                type: "BUY",
-                timestamp: sigInfo.blockTime,
-                signature: sigInfo.signature,
-                tokenMint: boughtToken.mint,
-                tokenAmount: boughtToken.amount,
-                solAmount: soldAmount,
-                symbol: tracker.symbol
-              })
-              
-              logger.info(`Detected BUY trade: ${soldAmount.toFixed(4)} SOL -> ${boughtToken.amount.toFixed(4)} ${tracker.symbol}`)
-            }
-            
-            // Case 2: Token → SOL (SELL)
-            else if (solChange.gt(0) && decreaseTokens.length === 1) {
-              const soldToken = decreaseTokens[0]
-              const receivedAmount = solChange
-              
-              // Skip if we've never tracked this token
-              if (!tokenTracker[soldToken.mint]) {
-                // This could be a token we received via transfer or airdrop
-                // Initialize tracking with what we know
-                tokenTracker[soldToken.mint] = {
-                  totalBought: soldToken.amount, // Assume we somehow acquired this amount
-                  totalSold: soldToken.amount,   // And now we're selling it
-                  totalSpentSol: new Decimal(0), // Unknown cost basis
-                  totalReceivedSol: receivedAmount,
-                  averageBuyPrice: new Decimal(0),
-                  symbol: "Unknown"
-                }
-                
-                // Try to get token info
-                try {
-                  const tokenInfo = await getTokenInfoFromAggregator(soldToken.mint)
-                  if (tokenInfo && tokenInfo.symbol) {
-                    tokenTracker[soldToken.mint].symbol = tokenInfo.symbol
-                  }
-                } catch (err) {
-                  logger.error(`Error getting token info for ${soldToken.mint}:`, err)
-                }
-              } else {
-                // Update existing tracker
-                const tracker = tokenTracker[soldToken.mint]
-                tracker.totalSold = tracker.totalSold.add(soldToken.amount)
-                tracker.totalReceivedSol = tracker.totalReceivedSol.add(receivedAmount)
-              }
-              
-              const tracker = tokenTracker[soldToken.mint]
-              
-              // Calculate profit/loss for this trade
-              const costBasis = tracker.averageBuyPrice.mul(soldToken.amount)
-              const tradePnL = receivedAmount.minus(costBasis)
-              
-              // Track as winning or losing trade
-              if (tradePnL.gt(0)) {
-                totalProfit = totalProfit.add(tradePnL)
-                winningTrades++
-              } else {
-                totalLoss = totalLoss.add(tradePnL.abs())
-                losingTrades++
-              }
-              
-              tradeDetails.push({
-                type: "SELL",
-                timestamp: sigInfo.blockTime,
-                signature: sigInfo.signature,
-                tokenMint: soldToken.mint,
-                tokenAmount: soldToken.amount,
-                solAmount: receivedAmount,
-                pnl: tradePnL,
-                symbol: tracker.symbol
-              })
-              
-              logger.info(`Detected SELL trade: ${soldToken.amount.toFixed(4)} ${tracker.symbol} -> ${receivedAmount.toFixed(4)} SOL (PnL: ${tradePnL.toFixed(4)})`)
-            }
-            
-            // Case 3: Token → Token (Swap)
-            else if (increaseTokens.length === 1 && decreaseTokens.length === 1) {
-              const boughtToken = increaseTokens[0]
-              const soldToken = decreaseTokens[0]
-              
-              // Initialize token tracking if needed for bought token
-              if (!tokenTracker[boughtToken.mint]) {
-                tokenTracker[boughtToken.mint] = {
-                  totalBought: new Decimal(0),
-                  totalSold: new Decimal(0),
-                  totalSpentSol: new Decimal(0),
-                  totalReceivedSol: new Decimal(0),
-                  averageBuyPrice: new Decimal(0),
-                  symbol: "Unknown"
-                }
-                
-                // Try to get token info
-                try {
-                  const tokenInfo = await getTokenInfoFromAggregator(boughtToken.mint)
-                  if (tokenInfo && tokenInfo.symbol) {
-                    tokenTracker[boughtToken.mint].symbol = tokenInfo.symbol
-                  }
-                } catch (err) {
-                  logger.error(`Error getting token info for ${boughtToken.mint}:`, err)
-                }
-              }
-              
-              // Initialize token tracking if needed for sold token
-              if (!tokenTracker[soldToken.mint]) {
-                tokenTracker[soldToken.mint] = {
-                  totalBought: soldToken.amount, // Assume we somehow acquired this amount
-                  totalSold: soldToken.amount,   // And now we're selling it
-                  totalSpentSol: new Decimal(0), // Unknown cost basis
-                  totalReceivedSol: new Decimal(0),
-                  averageBuyPrice: new Decimal(0),
-                  symbol: "Unknown"
-                }
-                
-                // Try to get token info
-                try {
-                  const tokenInfo = await getTokenInfoFromAggregator(soldToken.mint)
-                  if (tokenInfo && tokenInfo.symbol) {
-                    tokenTracker[soldToken.mint].symbol = tokenInfo.symbol
-                  }
-                } catch (err) {
-                  logger.error(`Error getting token info for ${soldToken.mint}:`, err)
-                }
-              }
-              
-              // Getting token prices to estimate SOL value
-              try {
-                const [soldTokenInfo, boughtTokenInfo] = await Promise.all([
-                  getTokenInfoFromAggregator(soldToken.mint),
-                  getTokenInfoFromAggregator(boughtToken.mint)
-                ])
-                
-                if (soldTokenInfo && soldTokenInfo.price && boughtTokenInfo && boughtTokenInfo.price) {
-                  const soldTokenSolPrice = new Decimal(soldTokenInfo.price).div(currentSolPrice)
-                  const boughtTokenSolPrice = new Decimal(boughtTokenInfo.price).div(currentSolPrice)
-                  
-                  const soldSolValue = soldToken.amount.mul(soldTokenSolPrice)
-                  const boughtSolValue = boughtToken.amount.mul(boughtTokenSolPrice)
-                  
-                  // Update token trackers
-                  const soldTracker = tokenTracker[soldToken.mint]
-                  soldTracker.totalSold = soldTracker.totalSold.add(soldToken.amount)
-                  soldTracker.totalReceivedSol = soldTracker.totalReceivedSol.add(boughtSolValue)
-                  
-                  const boughtTracker = tokenTracker[boughtToken.mint]
-                  boughtTracker.totalBought = boughtTracker.totalBought.add(boughtToken.amount)
-                  boughtTracker.totalSpentSol = boughtTracker.totalSpentSol.add(soldSolValue)
-                  
-                  // Update average buy price
-                  if (boughtTracker.totalBought.gt(0)) {
-                    boughtTracker.averageBuyPrice = boughtTracker.totalSpentSol.div(boughtTracker.totalBought)
-                  }
-                  
-                  // This is a token-token swap, so we'll track it but not include in PnL calculation
-                  // since the PnL will be realized when the received token is sold for SOL
-                  tradeDetails.push({
-                    type: "SWAP",
-                    timestamp: sigInfo.blockTime,
-                    signature: sigInfo.signature,
-                    fromTokenMint: soldToken.mint,
-                    fromTokenAmount: soldToken.amount,
-                    fromTokenSymbol: soldTracker.symbol,
-                    toTokenMint: boughtToken.mint,
-                    toTokenAmount: boughtToken.amount,
-                    toTokenSymbol: boughtTracker.symbol,
-                    estimatedSolValue: soldSolValue
-                  })
-                  
-                  logger.info(`Detected token SWAP: ${soldToken.amount.toFixed(4)} ${soldTracker.symbol} -> ${boughtToken.amount.toFixed(4)} ${boughtTracker.symbol}`)
-                }
-              } catch (err) {
-                logger.error(`Error processing token swap:`, err)
-              }
-            }
-          }
-        } catch (err) {
-          logger.error(`Error processing transaction ${sigInfo.signature}:`, err)
-        }
-      }
-    } catch (err) {
-      logger.error("Error fetching transaction history:", err)
-    }
-    
-    // Calculate final results for each token
-    const tokenPnLs = []
-    
-    for (const [mint, data] of Object.entries(tokenTracker)) {
-      // Only include tokens with both buys and sells
-      if (data.totalBought.gt(0)) {
-        // Calculate realized profit/loss
-        let realizedPnL = new Decimal(0)
-        if (data.totalSold.gt(0)) {
-          const costBasisForSold = data.totalSold.mul(data.averageBuyPrice)
-          realizedPnL = data.totalReceivedSol.minus(costBasisForSold)
-        }
-        
-        // Calculate unrealized profit/loss for remaining tokens
-        const remainingTokens = data.totalBought.minus(data.totalSold)
-        let unrealizedPnL = new Decimal(0)
-        
-        if (remainingTokens.gt(0)) {
-          try {
-            // Get current token price
-            const tokenInfo = await getTokenInfoFromAggregator(mint)
-            if (tokenInfo && tokenInfo.price > 0) {
-              const tokenSolPrice = new Decimal(tokenInfo.price).div(currentSolPrice)
-              const currentValue = remainingTokens.mul(tokenSolPrice)
-              const costBasis = remainingTokens.mul(data.averageBuyPrice)
-              unrealizedPnL = currentValue.minus(costBasis)
-            }
-          } catch (err) {
-            logger.error(`Error calculating unrealized PnL for ${mint}:`, err)
-          }
-        }
-        
-        const totalPnL = realizedPnL.add(unrealizedPnL)
-        const roi = data.totalSpentSol.gt(0) 
-          ? totalPnL.div(data.totalSpentSol).mul(100) 
-          : new Decimal(0)
-        
-        tokenPnLs.push({
-          mint,
-          symbol: data.symbol,
-          realizedPnL,
-          unrealizedPnL,
-          totalPnL,
-          roi,
-          remainingTokens
-        })
-      }
-    }
-    
-    // Sort tokens by total PnL (highest first)
-    tokenPnLs.sort((a, b) => b.totalPnL.minus(a.totalPnL).toNumber())
-    
-    // Calculate overall PnL
-    const netPnL = totalProfit.minus(totalLoss)
-    const totalTrades = winningTrades + losingTrades
-    const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0
-    
-    return {
-      period,
-      netPnL,
-      totalProfit,
-      totalLoss,
-      totalFees,
-      winningTrades,
-      losingTrades,
-      totalTrades,
-      winRate,
-      tokenPnLs,
-      tradeDetails
-    }
-  } catch (err) {
-    logger.error("Error calculating PNL:", err)
-    return {
-      period,
-      netPnL: new Decimal(0),
-      totalProfit: new Decimal(0),
-      totalLoss: new Decimal(0),
-      totalFees: new Decimal(0),
-      winningTrades: 0,
-      losingTrades: 0,
-      totalTrades: 0,
-      winRate: 0,
-      tokenPnLs: [],
-      tradeDetails: []
-    }
-  }
-}
-
-// Format and display PNL information
-// Format and display PNL information
-async function displayPNL(chatId, pnlData) {
-  try {
-    // Format the PNL summary
-    let periodText
-    switch(pnlData.period) {
-      case "24h": periodText = "24 Hours"; break
-      case "3d": periodText = "3 Days"; break
-      case "7d": periodText = "7 Days"; break
-      case "1m": periodText = "1 Month"; break
-      case "1y": periodText = "1 Year"; break
-      default: periodText = "All Time"
-    }
-    
-    const solPrice = await getSolPriceUSD()
-    const netPnLusd = pnlData.netPnL.mul(solPrice)
-    
-    let message = `📊 *PNL Summary (${periodText})*\n\n`
-    
-    // Net PNL with color indicator
-    if (pnlData.netPnL.gt(0)) {
-      message += `🟢 *Net Profit/Loss:* +${pnlData.netPnL.toFixed(4)} SOL ($${netPnLusd.toFixed(2)})\n`
-    } else if (pnlData.netPnL.lt(0)) {
-      message += `🔴 *Net Profit/Loss:* ${pnlData.netPnL.toFixed(4)} SOL ($${netPnLusd.toFixed(2)})\n`
-    } else {
-      message += `⚪ *Net Profit/Loss:* 0.0000 SOL ($0.00)\n`
-    }
-    
-    // Trade statistics
-    message += `\n*Trade Statistics:*\n`
-    message += `• Total Trades: ${pnlData.totalTrades}\n`
-    message += `• Winning: ${pnlData.winningTrades} | Losing: ${pnlData.losingTrades}\n`
-    message += `• Win Rate: ${pnlData.winRate.toFixed(2)}%\n`
-    message += `• Trading Fees: ${pnlData.totalFees.toFixed(4)} SOL\n`
-    
-    // Top performing tokens (limit to top 5)
-    const topTokens = pnlData.tokenPnLs.slice(0, 5)
-    if (topTokens.length > 0) {
-      message += `\n*Token Performance:*\n`
-      
-      for (const token of topTokens) {
-        const roiFormatted = formatPercentage(token.roi.toNumber())
-        const remainingText = token.remainingTokens.gt(0) 
-          ? ` (${token.remainingTokens.toFixed(4)} tokens held)`
-          : ``
-        
-        if (token.totalPnL.gt(0)) {
-          message += `• ${token.symbol}: +${token.totalPnL.toFixed(4)} SOL (ROI: ${roiFormatted})${remainingText}\n`
-        } else {
-          message += `• ${token.symbol}: ${token.totalPnL.toFixed(4)} SOL (ROI: ${roiFormatted})${remainingText}\n`
-        }
-      }
-    }
-    
-    // Show instructions if needed
-    if (pnlData.tradeDetails.length === 0 && pnlData.tokenPnLs.length === 0) {
-      message += `\n*No trades found for this time period.*\n\n`
-      message += `Note: PNL tracking works by analyzing your on-chain transaction history for token swaps. `
-      message += `If you've made trades that aren't showing, try selecting a longer time period.`
-    } 
-    // Show recent trades info
-    else if (pnlData.tradeDetails.length > 0) {
-      // Get up to 5 most recent trades
-      const recentTrades = pnlData.tradeDetails
-        .sort((a, b) => b.timestamp - a.timestamp)
-        .slice(0, 5)
-        
-      message += `\n*Recent Transactions:*\n`
-      
-      for (const trade of recentTrades) {
-        const date = new Date(trade.timestamp * 1000)
-        const dateStr = `${date.getMonth()+1}/${date.getDate()}`
-        
-        if (trade.type === "BUY") {
-          message += `• 💰 Buy: ${trade.solAmount.toFixed(4)} SOL → ${trade.tokenAmount.toFixed(4)} ${trade.symbol} (${dateStr})\n`
-        } else if (trade.type === "SELL") {
-          const pnlText = trade.pnl 
-            ? (trade.pnl.gt(0) ? ` (+${trade.pnl.toFixed(4)})` : ` (${trade.pnl.toFixed(4)})`) 
-            : ""
-          message += `• 💱 Sell: ${trade.tokenAmount.toFixed(4)} ${trade.symbol} → ${trade.solAmount.toFixed(4)} SOL${pnlText} (${dateStr})\n`
-        } else if (trade.type === "SWAP") {
-          message += `• 🔄 Swap: ${trade.fromTokenAmount.toFixed(4)} ${trade.fromTokenSymbol} → ${trade.toTokenAmount.toFixed(4)} ${trade.toTokenSymbol} (${dateStr})\n`
-        }
-      }
-      
-      // Add a link to view more details
-      message += `\n*View details:* [Solscan](https://solscan.io/address/${pnlData.walletAddress || ""})`
-    }
-    
-    // Send the message
-    await bot.sendMessage(chatId, message, {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "« Back to Time Periods", callback_data: "PNL_MENU" }],
-          [{ text: "« Back to Main Menu", callback_data: "BACK_MAIN" }]
-        ]
-      },
-      disable_web_page_preview: true
-    })
-  } catch (err) {
-    logger.error("Error displaying PNL:", err)
-    await bot.sendMessage(chatId, "Error displaying PNL information. Please try again.", {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "« Back", callback_data: "BACK_MAIN" }]
-        ]
-      }
-    })
-  }
-}
-
-// ---------------------------------------------------------
 // Slash commands
 // ---------------------------------------------------------
 bot.setMyCommands([
@@ -2816,7 +2186,7 @@ bot.setMyCommands([
   { command: "buy", description: "Buy tokens (swap SOL->token)" },
   { command: "sell", description: "Sell tokens (swap token->SOL)" },
   { command: "withdraw", description: "Withdraw SOL to another address" },
-  { command: "pnl", description: "View your trading profit and loss" },
+  { command: "pnl", description: "Calculate profit and loss" },
   { command: "settings", description: "Manage wallet settings" },
   { command: "help", description: "Show help info" },
 ]);
@@ -2957,27 +2327,6 @@ bot.onText(/\/withdraw/, (msg) => {
   }
 })
 
-// /pnl
-bot.onText(/\/pnl/, async (msg) => {
-  try {
-    const chatId = msg.chat.id
-    clearPendingForSlash(chatId)
-    
-    const u = await getUserRow(chatId)
-    if (!u || !u.public_key) {
-      return bot.sendMessage(chatId, "No wallet found. Please /start => create or import one.")
-    }
-    
-    const txt = `📈 *Profit and Loss Analysis*\n\nSelect a time period to view your trading performance:`
-    await bot.sendMessage(chatId, txt, {
-      parse_mode: "Markdown",
-      reply_markup: pnlTimeframeKeyboard()
-    })
-  } catch (err) {
-    logger.error("/pnl command error:", err)
-  }
-})
-
 // /settings
 bot.onText(/\/settings/, (msg) => {
   try {
@@ -2988,5 +2337,355 @@ bot.onText(/\/settings/, (msg) => {
     logger.error("/settings command error:", err)
   }
 })
+
+
+// ---------------------------------------------------------
+// PnL Helper Functions
+// ---------------------------------------------------------
+
+// Formats number as SOL with 4 decimal places
+function formatSol(n) {
+  return new Decimal(n).toFixed(4);
+}
+
+// Helper to format a timestamp
+function formatDate(timestamp) {
+  return new Date(timestamp * 1000).toLocaleDateString('en-US', { 
+    month: 'short', 
+    day: 'numeric', 
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+// Time period definitions in seconds
+const PERIOD_SEC = {
+  "24h": 86400,
+  "3d": 86400 * 3,
+  "7d": 86400 * 7,
+  "1m": 86400 * 30,
+  "1y": 86400 * 365
+};
+
+// Regex to identify trading transactions
+const TRADE_RE = /SWAP|DEX|AMM|TRADE|JUPITER|RAYDIUM/i;
+
+// Fetch wallet transactions from Helius API
+async function fetchWalletTransactions(address, startTimestamp = 0) {
+  try {
+    const transactions = [];
+    let before = "";
+    let done = false;
+    
+    while (!done) {
+      const baseUrl = `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${HELIUS_API_KEY}&limit=100`;
+      const url = baseUrl + (before ? `&before=${before}` : "");
+      
+      const list = await axios.get(url);
+      
+      if (!list.data || list.data.length === 0) {
+        done = true;
+        break;
+      }
+      
+      before = list.data[list.data.length - 1].signature;
+      
+      for (const tx of list.data) {
+        if (startTimestamp && tx.timestamp < startTimestamp) {
+          done = true;
+          break;
+        }
+        
+        const accountData = tx.accountData?.find(a => a.account === address);
+        const nativeBalanceChange = accountData?.nativeBalanceChange || 0;
+        
+        if (nativeBalanceChange === 0) continue;
+        
+        const sol = nativeBalanceChange / 1_000_000_000;
+        const inOut = sol > 0 ? "in" : "out";
+        const kind = TRADE_RE.test(tx.type || "") ? "trade" : "transfer";
+        
+        transactions.push({
+          timestamp: tx.timestamp,
+          signature: tx.signature,
+          sol,
+          inOut,
+          kind
+        });
+      }
+    }
+    
+    return transactions;
+  } catch (error) {
+    logger.error("Error fetching wallet transactions:", error);
+    throw new Error("Failed to fetch transaction history.");
+  }
+}
+
+// Calculate period stats (trades, profit, loss)
+function calculatePeriodStats(transactions) {
+  let profit = 0;
+  let loss = 0;
+  
+  transactions.forEach(tx => {
+    if (tx.sol > 0) {
+      profit += tx.sol;
+    } else {
+      loss += Math.abs(tx.sol);
+    }
+  });
+  
+  return {
+    trades: transactions.length,
+    profit,
+    loss,
+    net: profit - loss
+  };
+}
+
+// Calculate overall stats
+function calculateOverallStats(transactions) {
+  const total = transactions.length;
+  const win = transactions.filter(tx => tx.sol > 0).length;
+  const lose = total - win;
+  
+  let earned = 0;
+  let spent = 0;
+  
+  transactions.forEach(tx => {
+    if (tx.sol > 0) {
+      earned += tx.sol;
+    } else {
+      spent += Math.abs(tx.sol);
+    }
+  });
+  
+  return {
+    total,
+    win,
+    lose,
+    winRate: total ? (win / total * 100) : 0,
+    earned,
+    spent,
+    net: earned - spent,
+    roi: spent ? (earned - spent) / spent * 100 : 0
+  };
+}
+
+// Format PnL results as a message
+function formatPnLResults(periodLabel, periodStats, overallStats, filter = "all") {
+  let message = `📊 *Profit & Loss Analysis* (${periodLabel})\n\n`;
+  
+  // Filter label
+  if (filter === "trade") {
+    message += "🔍 *Showing: Trading Only*\n\n";
+  } else if (filter === "transfer") {
+    message += "🔍 *Showing: Transfers Only*\n\n";
+  }
+  
+  // Period stats
+  message += `*📅 Period Stats*\n`;
+  message += `• Transactions: *${periodStats.trades}*\n`;
+  message += `• Profit: *${formatSol(periodStats.profit)}* SOL\n`;
+  message += `• Loss: *${formatSol(periodStats.loss)}* SOL\n\n`;
+  
+  // Trade quality
+  message += `*🎯 Transaction Quality*\n`;
+  message += `• Win Rate: *${overallStats.winRate.toFixed(2)}%*\n`;
+  message += `• Winning Txs: *${overallStats.win}*\n`;
+  message += `• Losing Txs: *${overallStats.lose}*\n\n`;
+  
+  // Financial summary
+  message += `*💰 Financial Summary*\n`;
+  message += `• Net P/L: *${formatSol(overallStats.net)}* SOL\n`;
+  message += `• ROI: *${overallStats.roi.toFixed(2)}%*\n`;
+  message += `• Total In: *${formatSol(overallStats.earned)}* SOL\n`;
+  message += `• Total Out: *${formatSol(overallStats.spent)}* SOL\n`;
+  
+  return message;
+}
+
+// Show PnL menu to user
+async function showPnLMenu(chatId, messageId) {
+  const message = `📈 *Profit & Loss Calculator*\n\nAnalyze your wallet's performance by selecting a time period:`;
+  
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "24 Hours", callback_data: "PNL_PERIOD_24h" },
+        { text: "3 Days", callback_data: "PNL_PERIOD_3d" },
+      ],
+      [
+        { text: "7 Days", callback_data: "PNL_PERIOD_7d" },
+        { text: "1 Month", callback_data: "PNL_PERIOD_1m" },
+      ],
+      [
+        { text: "1 Year", callback_data: "PNL_PERIOD_1y" },
+      ],
+      [
+        { text: "« Back to Main", callback_data: "BACK_MAIN" },
+      ],
+    ],
+  };
+  
+  await editMessageText(chatId, messageId, message, keyboard);
+}
+
+// Process PnL calculation for a specific period
+async function processPnL(chatId, period) {
+  try {
+    const u = await getUserRow(chatId);
+    if (!u || !u.public_key) {
+      await bot.sendMessage(chatId, "Please connect a wallet first to use this feature.", {
+        reply_markup: {
+          inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+        },
+      });
+      return;
+    }
+
+    // Create a loading message
+    const loadingMsg = await bot.sendMessage(chatId, `⏳ *Calculating ${period} PnL...*\nFetching transaction history, please wait...`, {
+      parse_mode: "Markdown"
+    });
+
+    // Calculate start timestamp based on period
+    const nowTs = Math.floor(Date.now() / 1000);
+    const startTs = nowTs - PERIOD_SEC[period];
+    
+    // Fetch transactions
+    const transactions = await fetchWalletTransactions(u.public_key, startTs);
+    
+    // Update loading message to show progress
+    await bot.editMessageText(`⏳ *Calculating ${period} PnL...*\nAnalyzing ${transactions.length} transactions...`, {
+      chat_id: chatId,
+      message_id: loadingMsg.message_id,
+      parse_mode: "Markdown"
+    });
+    
+    if (transactions.length === 0) {
+      await bot.editMessageText(`No transactions found in the last ${period}.`, {
+        chat_id: chatId,
+        message_id: loadingMsg.message_id,
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [[{ text: "« Back", callback_data: "PNL_MENU" }]],
+        },
+      });
+      return;
+    }
+    
+    // Store in session for filtering
+    userSessions[chatId] = userSessions[chatId] || {};
+    userSessions[chatId].pnlData = {
+      period,
+      transactions,
+      filter: "all"
+    };
+    
+    // Calculate initial stats
+    const filteredTxs = transactions;
+    const periodStats = calculatePeriodStats(filteredTxs);
+    const overallStats = calculateOverallStats(filteredTxs);
+    
+    // Generate the message
+    const message = formatPnLResults(period, periodStats, overallStats);
+    
+    // Add filter buttons
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "All", callback_data: "PNL_FILTER_all" },
+          { text: "Trades", callback_data: "PNL_FILTER_trade" },
+          { text: "Transfers", callback_data: "PNL_FILTER_transfer" },
+        ],
+        [
+          { text: "« Back to Periods", callback_data: "PNL_MENU" },
+          { text: "« Back to Main", callback_data: "BACK_MAIN" },
+        ],
+      ],
+    };
+    
+    // Update the message with results
+    await bot.editMessageText(message, {
+      chat_id: chatId,
+      message_id: loadingMsg.message_id,
+      parse_mode: "Markdown",
+      reply_markup: keyboard,
+    });
+    
+  } catch (error) {
+    logger.error("PnL calculation error:", error);
+    await bot.sendMessage(chatId, "Error calculating PnL: " + error.message, {
+      reply_markup: {
+        inline_keyboard: [[{ text: "« Back", callback_data: "PNL_MENU" }]],
+      },
+    });
+  }
+}
+
+// Apply filters to PnL data and update display
+async function applyPnLFilter(chatId, messageId, filter) {
+  try {
+    const session = userSessions[chatId];
+    if (!session || !session.pnlData) {
+      await bot.editMessageText("Session expired. Please start again.", {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: {
+          inline_keyboard: [[{ text: "« Back", callback_data: "PNL_MENU" }]],
+        },
+      });
+      return;
+    }
+    
+    // Update filter in session
+    session.pnlData.filter = filter;
+    
+    // Apply filter
+    const { period, transactions } = session.pnlData;
+    let filteredTxs = transactions;
+    
+    if (filter === "trade") {
+      filteredTxs = transactions.filter(tx => tx.kind === "trade");
+    } else if (filter === "transfer") {
+      filteredTxs = transactions.filter(tx => tx.kind === "transfer");
+    }
+    
+    // Recalculate stats
+    const periodStats = calculatePeriodStats(filteredTxs);
+    const overallStats = calculateOverallStats(filteredTxs);
+    
+    // Update message
+    const message = formatPnLResults(period, periodStats, overallStats, filter);
+    
+    // Add filter buttons (highlight selected)
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: filter === "all" ? "● All" : "All", callback_data: "PNL_FILTER_all" },
+          { text: filter === "trade" ? "● Trades" : "Trades", callback_data: "PNL_FILTER_trade" },
+          { text: filter === "transfer" ? "● Transfers" : "Transfers", callback_data: "PNL_FILTER_transfer" },
+        ],
+        [
+          { text: "« Back to Periods", callback_data: "PNL_MENU" },
+          { text: "« Back to Main", callback_data: "BACK_MAIN" },
+        ],
+      ],
+    };
+    
+    await editMessageText(chatId, messageId, message, keyboard);
+    
+  } catch (error) {
+    logger.error("PnL filter error:", error);
+    await bot.sendMessage(chatId, "Error applying filter: " + error.message, {
+      reply_markup: {
+        inline_keyboard: [[{ text: "« Back", callback_data: "PNL_MENU" }]],
+      },
+    });
+  }
+}
+
 
 logger.info("Telegram bot started...")
