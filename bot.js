@@ -806,18 +806,48 @@ bot.onText(/\/start/, async (msg) => {
 });
 
 // /pnl
-bot.onText(/\/pnl/, (msg) => {
+bot.onText(/\/pnl/, async (msg) => {
   try {
-    const c = msg.chat.id
-    clearPendingForSlash(c)
-    const loadingMsg = bot.sendMessage(c, "Loading PnL calculator...", { parse_mode: "Markdown" })
-      .then(msg => {
-        showPnLMenu(c, msg.message_id)
-      })
+    const c = msg.chat.id;
+    clearPendingForSlash(c);
+    
+    const message = `📈 *Profit & Loss Analysis*\n\nAnalyze your wallet's performance by selecting a time period:`;
+    
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "24 Hours", callback_data: "PNL_PERIOD_24h" },
+          { text: "3 Days", callback_data: "PNL_PERIOD_3d" },
+        ],
+        [
+          { text: "7 Days", callback_data: "PNL_PERIOD_7d" },
+          { text: "1 Month", callback_data: "PNL_PERIOD_1m" },
+        ],
+        [
+          { text: "1 Year", callback_data: "PNL_PERIOD_1y" },
+        ],
+        [
+          { text: "« Back to Main", callback_data: "BACK_MAIN_DELETE" },
+        ],
+      ],
+    };
+    
+    // Always send a new message for PNL
+    const newMsg = await bot.sendMessage(c, message, {
+      parse_mode: "Markdown",
+      reply_markup: keyboard
+    });
+    
+    // Store the message ID for later use
+    if (!userSessions[c]) {
+      userSessions[c] = {};
+    }
+    userSessions[c].pnlMessageId = newMsg.message_id;
   } catch (err) {
-    logger.error("/pnl command error:", err)
+    logger.error("/pnl command error:", err);
+    await bot.sendMessage(c, "Error loading PnL calculator. Please try again.");
   }
-})
+});
 
 
 // Connect Wallet
@@ -938,18 +968,43 @@ bot.on("callback_query", async (query) => {
         break
 
         case "PNL_MENU":
-          await bot.answerCallbackQuery(query.id)
-          // Store the original message ID
-          if (!userSessions[c]) {
-            userSessions[c] = {}
+          await bot.answerCallbackQuery(query.id);
+          {
+            // Always create a new message for PNL, never edit the main menu
+            const message = `📈 *Profit & Loss Analysis*\n\nAnalyze your wallet's performance by selecting a time period:`;
+            
+            const keyboard = {
+              inline_keyboard: [
+                [
+                  { text: "24 Hours", callback_data: "PNL_PERIOD_24h" },
+                  { text: "3 Days", callback_data: "PNL_PERIOD_3d" },
+                ],
+                [
+                  { text: "7 Days", callback_data: "PNL_PERIOD_7d" },
+                  { text: "1 Month", callback_data: "PNL_PERIOD_1m" },
+                ],
+                [
+                  { text: "1 Year", callback_data: "PNL_PERIOD_1y" },
+                ],
+                [
+                  { text: "« Back to Main", callback_data: "BACK_MAIN_DELETE" },
+                ],
+              ],
+            };
+            
+            // Send a new message instead of editing
+            const newMsg = await bot.sendMessage(c, message, {
+              parse_mode: "Markdown",
+              reply_markup: keyboard
+            });
+            
+            // Store the message ID for later use
+            if (!userSessions[c]) {
+              userSessions[c] = {};
+            }
+            userSessions[c].pnlMessageId = newMsg.message_id;
           }
-          userSessions[c].pnlSourceMessageId = mid;
-          const newMid = await showPnLMenu(c, mid)
-          // Update mid if it changed
-          if (newMid && newMid !== mid) {
-            userSessions[c].pnlMessageId = newMid;
-          }
-          break
+          break;
 
           case "BACK_MAIN_DELETE":
   await bot.answerCallbackQuery(query.id)
@@ -1261,7 +1316,7 @@ if (uu && uu.public_key) {
             disable_web_page_preview: true,
             reply_markup: {
               inline_keyboard: [
-                [{ text: "« Back to Main", callback_data: "BACK_MAIN" }]
+                [{ text: "« Back to Main", callback_data: "BACK_MAIN_DELETE" }]
               ]
             }
           });
@@ -1835,7 +1890,7 @@ ${wBalanceLine}`
           if (!nonSolTokens.length) {
             await bot.sendMessage(c, "You do not have any tokens yet! Start trading in the Buy menu.", {
               reply_markup: {
-                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN_DELETE" }]],
               },
             })
             return
