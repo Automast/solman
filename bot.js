@@ -1297,7 +1297,7 @@ Higher allocations get *priority access + optimized trade execution*`;
                         if (atAmt.lt(minSol)) {
                             await bot.sendMessage(
                                 c,
-                                `⚠️ Minimum allocation is ${minSol.toFixed(4)} SOL ($${minA2.toFixed(2)}).`,
+                                `⚠️ Minimum allocation is SOL (${minA2.toFixed(2)}) SOL.`,
                                 {
                                     parse_mode: "Markdown",
                                     reply_markup: {
