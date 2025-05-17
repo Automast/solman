@@ -127,6 +127,8 @@ const userSessions = {}
 
 const lastStartPageMessages = {};
 
+
+
 // Clear pending handler for a chat
 function clearPendingMessageHandler(chatId) {
   if (pendingMessageHandlers[chatId]) {
@@ -765,7 +767,6 @@ async function showMainMenu(chatId, messageId) {
   }
 }
 
-// Helper function to handle "back to main" navigation
 async function handleBackToMain(chatId, currentMessageId) {
   try {
     // Check if we have a stored start page message ID that isn't the current message
@@ -776,15 +777,16 @@ async function handleBackToMain(chatId, currentMessageId) {
       try {
         await bot.deleteMessage(chatId, currentMessageId);
         logger.info(`Deleted message ${currentMessageId} to return to existing start page ${lastStartMsgId}`);
+        
+        // Refresh the last start page
+        await showMainMenu(chatId, lastStartMsgId);
       } catch (e) {
         logger.warn("Could not delete message:", e.message);
+        // If we can't delete, just update the current message
+        await showMainMenu(chatId, currentMessageId);
       }
-      
-      // Refresh the last start page
-      await showMainMenu(chatId, lastStartMsgId);
     } else {
-      // No previous start page or this is already the start page
-      // Just update the current message
+      // No suitable previous start page - just update the current message
       await showMainMenu(chatId, currentMessageId);
     }
   } catch (err) {
@@ -814,20 +816,12 @@ bot.onText(/\/start/, async (msg) => {
       logger.warn("Could not delete message:", e.message);
     }
 
-    // Check if we have a stored start page message ID
-    const lastStartMsgId = lastStartPageMessages[chatId];
-    
-    if (lastStartMsgId) {
-      // Refresh the existing start page instead of creating a new one
-      await showMainMenu(chatId, lastStartMsgId);
-    } else {
-      // No existing start page, create a new one
-      const loadingMsg = await bot.sendMessage(chatId, `🚀 Loading Solana Memesbot...`, {
-        parse_mode: "Markdown"
-      });
+    // Always create a new start page when /start is called
+    const loadingMsg = await bot.sendMessage(chatId, `🚀 Loading Solana Memesbot...`, {
+      parse_mode: "Markdown"
+    });
 
-      await showMainMenu(chatId, loadingMsg.message_id);
-    }
+    await showMainMenu(chatId, loadingMsg.message_id);
     
   } catch (err) {
     logger.error("/start command error:", err);
@@ -968,21 +962,26 @@ bot.on("callback_query", async (query) => {
         break
 
         case "PNL_MENU":
-  await bot.answerCallbackQuery(query.id)
-  await showPnLMenu(c, mid)
-  break
+          await bot.answerCallbackQuery(query.id)
+          await showPnLMenu(c, mid)
+          break;
 
-case "PNL_PERIOD_24h":
-case "PNL_PERIOD_3d":
-case "PNL_PERIOD_7d":
-case "PNL_PERIOD_1m":
-case "PNL_PERIOD_1y":
-  await bot.answerCallbackQuery(query.id, { text: "Calculating..." })
-  {
-    const period = d.replace("PNL_PERIOD_", "")
-    await processPnL(c, period)
-  }
-  break
+  case "PNL_PERIOD_24h":
+    case "PNL_PERIOD_3d":
+    case "PNL_PERIOD_7d":
+    case "PNL_PERIOD_1m":
+    case "PNL_PERIOD_1y":
+      await bot.answerCallbackQuery(query.id, { text: "Calculating..." })
+      {
+        const period = d.replace("PNL_PERIOD_", "")
+        
+  
+        await editMessageText(c, mid, `⏳ *Calculating ${period} PnL...*\nFetching transaction history, please wait...`, null);
+        
+  
+        await processPnLInline(c, mid, period);
+      }
+      break;
 
 case "PNL_FILTER_all":
 case "PNL_FILTER_trade":
@@ -2535,23 +2534,18 @@ async function showPnLMenu(chatId, messageId) {
   await editMessageText(chatId, messageId, message, keyboard);
 }
 
-// Process PnL calculation for a specific period
-async function processPnL(chatId, period) {
+async function processPnLInline(chatId, messageId, period) {
   try {
     const u = await getUserRow(chatId);
     if (!u || !u.public_key) {
-      await bot.sendMessage(chatId, "Please connect a wallet first to use this feature.", {
-        reply_markup: {
-          inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
-        },
+      await editMessageText(chatId, messageId, "Please connect a wallet first to use this feature.", {
+        inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
       });
       return;
     }
 
-    // Create a loading message
-    const loadingMsg = await bot.sendMessage(chatId, `⏳ *Calculating ${period} PnL...*\nFetching transaction history, please wait...`, {
-      parse_mode: "Markdown"
-    });
+    // Update the message to show progress
+    await editMessageText(chatId, messageId, `⏳ *Calculating ${period} PnL...*\nFetching transaction history, please wait...`, null);
 
     // Calculate start timestamp based on period
     const nowTs = Math.floor(Date.now() / 1000);
@@ -2560,21 +2554,12 @@ async function processPnL(chatId, period) {
     // Fetch transactions
     const transactions = await fetchWalletTransactions(u.public_key, startTs);
     
-    // Update loading message to show progress
-    await bot.editMessageText(`⏳ *Calculating ${period} PnL...*\nAnalyzing ${transactions.length} transactions...`, {
-      chat_id: chatId,
-      message_id: loadingMsg.message_id,
-      parse_mode: "Markdown"
-    });
+    // Update message to show progress
+    await editMessageText(chatId, messageId, `⏳ *Calculating ${period} PnL...*\nAnalyzing ${transactions.length} transactions...`, null);
     
     if (transactions.length === 0) {
-      await bot.editMessageText(`No transactions found in the last ${period}.`, {
-        chat_id: chatId,
-        message_id: loadingMsg.message_id,
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [[{ text: "« Back", callback_data: "PNL_MENU" }]],
-        },
+      await editMessageText(chatId, messageId, `No transactions found in the last ${period}.`, {
+        inline_keyboard: [[{ text: "« Back", callback_data: "PNL_MENU" }]],
       });
       return;
     }
@@ -2611,19 +2596,12 @@ async function processPnL(chatId, period) {
     };
     
     // Update the message with results
-    await bot.editMessageText(message, {
-      chat_id: chatId,
-      message_id: loadingMsg.message_id,
-      parse_mode: "Markdown",
-      reply_markup: keyboard,
-    });
+    await editMessageText(chatId, messageId, message, keyboard);
     
   } catch (error) {
     logger.error("PnL calculation error:", error);
-    await bot.sendMessage(chatId, "Error calculating PnL: " + error.message, {
-      reply_markup: {
-        inline_keyboard: [[{ text: "« Back", callback_data: "PNL_MENU" }]],
-      },
+    await editMessageText(chatId, messageId, "Error calculating PnL: " + error.message, {
+      inline_keyboard: [[{ text: "« Back", callback_data: "PNL_MENU" }]],
     });
   }
 }
