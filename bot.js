@@ -1117,40 +1117,43 @@ bot.on("callback_query", async (query) => {
   }
   break
 
-case "PNL_24H":
-case "PNL_3D":
-case "PNL_7D":
-case "PNL_1M": 
-case "PNL_1Y":
-case "PNL_ALL":
-  await bot.answerCallbackQuery(query.id, { text: "Calculating PNL..." })
-  {
-    // Map callback data to period string
-    const periodMap = {
-      "PNL_24H": "24h",
-      "PNL_3D": "3d",
-      "PNL_7D": "7d",
-      "PNL_1M": "1m",
-      "PNL_1Y": "1y",
-      "PNL_ALL": "all"
-    }
-    
-    const period = periodMap[d]
-    
-    // Display loading message
-    await editMessageText(c, mid, "📊 *Calculating PNL*\n\nAnalyzing your trading history. This may take a moment...", {
-      inline_keyboard: [
-        [{ text: "« Back", callback_data: "PNL_MENU" }]
-      ]
-    })
-    
-    // Calculate PNL for the selected period
-    const pnlData = await calculatePNL(u.public_key, period)
-    
-    // Display the results
-    await displayPNL(c, pnlData)
-  }
-  break
+  case "PNL_24H":
+    case "PNL_3D":
+    case "PNL_7D":
+    case "PNL_1M": 
+    case "PNL_1Y":
+    case "PNL_ALL":
+      await bot.answerCallbackQuery(query.id, { text: "Calculating PNL..." })
+      {
+        // Map callback data to period string
+        const periodMap = {
+          "PNL_24H": "24h",
+          "PNL_3D": "3d",
+          "PNL_7D": "7d",
+          "PNL_1M": "1m",
+          "PNL_1Y": "1y",
+          "PNL_ALL": "all"
+        }
+        
+        const period = periodMap[d]
+        
+        // Display loading message
+        await editMessageText(c, mid, "📊 *Calculating PNL*\n\nAnalyzing your trading history. This may take a moment...", {
+          inline_keyboard: [
+            [{ text: "« Back", callback_data: "PNL_MENU" }]
+          ]
+        })
+        
+        // Calculate PNL for the selected period
+        const pnlData = await calculatePNL(u.public_key, period)
+        
+        // Add wallet address to the PNL data for links
+        pnlData.walletAddress = u.public_key
+        
+        // Display the results
+        await displayPNL(c, pnlData)
+      }
+      break
 
       case "BACK_MAIN":
         await bot.answerCallbackQuery(query.id)
@@ -2264,9 +2267,7 @@ async function calculatePNL(pubkeyStr, period) {
     // Convert period to timestamp
     const startTimestamp = getTimestampForPeriod(period)
     
-    // Fetch transactions
-    const transactions = await getTransactionHistory(pubkeyStr, startTimestamp)
-    
+    // Initialize tracking variables
     let totalProfit = new Decimal(0)
     let totalLoss = new Decimal(0)
     let totalFees = new Decimal(0)
@@ -2274,205 +2275,381 @@ async function calculatePNL(pubkeyStr, period) {
     let losingTrades = 0
     let tradeDetails = []
     
-    // Track token balances over time
-    const tokenBalances = {}
+    // Get current SOL price for USD calculations
+    const currentSolPrice = await getSolPriceUSD()
     
-    // Analyze each transaction
-    for (const txData of transactions) {
-      try {
-        const tx = txData.transaction
+    // Track token balances by mint address
+    const tokenTracker = {}
+    
+    try {
+      // Connect to Solana
+      const connection = new Connection(SOLANA_RPC_URL, "confirmed")
+      const publicKey = new PublicKey(pubkeyStr)
+      
+      // Get transaction signatures (most recent first)
+      const signatures = await connection.getSignaturesForAddress(
+        publicKey,
+        { limit: 100 }
+      )
+      
+      // Filter by time period if needed
+      const filteredSignatures = startTimestamp > 0 
+        ? signatures.filter(sig => sig.blockTime && sig.blockTime >= startTimestamp)
+        : signatures
+      
+      logger.info(`Found ${filteredSignatures.length} transactions for PNL analysis`)
+      
+      // Process each transaction
+      for (const sigInfo of filteredSignatures) {
+        if (sigInfo.err) continue // Skip failed transactions
         
-        // Skip transactions without metadata
-        if (!tx.meta) continue
-        
-        // Track fees
-        totalFees = totalFees.add(new Decimal(tx.meta.fee).div(1_000_000_000))
-        
-        // Analyze token transfers to detect trades
-        if (tx.meta.preTokenBalances && tx.meta.postTokenBalances) {
-          // Check if this transaction is a token swap/trade
-          const preBalances = tx.meta.preTokenBalances
-          const postBalances = tx.meta.postTokenBalances
+        try {
+          // Get full transaction data
+          const txData = await connection.getTransaction(
+            sigInfo.signature,
+            { commitment: "confirmed", maxSupportedTransactionVersion: 0 }
+          )
           
-          // Simple heuristic for swap: token balance decreases for one token and increases for another
-          for (const preBalance of preBalances) {
-            // Only look at the user's token accounts
-            if (preBalance.owner === pubkeyStr) {
-              const mint = preBalance.mint
-              const preAmount = new Decimal(preBalance.uiTokenAmount.uiAmount || 0)
+          if (!txData || !txData.meta) continue
+          
+          // Track transaction fee
+          totalFees = totalFees.add(new Decimal(txData.meta.fee).div(1_000_000_000))
+          
+          // Check if this is a swap transaction by looking at token balance changes
+          if (txData.meta.preTokenBalances && txData.meta.postTokenBalances) {
+            const preBalances = txData.meta.preTokenBalances
+            const postBalances = txData.meta.postTokenBalances
+            
+            // Map wallet token accounts to balances for easier lookup
+            const preBalanceMap = {}
+            const postBalanceMap = {}
+            
+            // Only include the user's token accounts
+            for (const balance of preBalances) {
+              if (balance.owner === pubkeyStr) {
+                preBalanceMap[balance.mint] = new Decimal(
+                  balance.uiTokenAmount.uiAmount || 0
+                )
+              }
+            }
+            
+            for (const balance of postBalances) {
+              if (balance.owner === pubkeyStr) {
+                postBalanceMap[balance.mint] = new Decimal(
+                  balance.uiTokenAmount.uiAmount || 0
+                )
+              }
+            }
+            
+            // Find tokens whose balance changed
+            const allMints = new Set([
+              ...Object.keys(preBalanceMap),
+              ...Object.keys(postBalanceMap)
+            ])
+            
+            // Track which tokens increased/decreased
+            const increaseTokens = []
+            const decreaseTokens = []
+            
+            for (const mint of allMints) {
+              const preBal = preBalanceMap[mint] || new Decimal(0)
+              const postBal = postBalanceMap[mint] || new Decimal(0)
+              const change = postBal.minus(preBal)
               
-              // Find the corresponding post balance
-              const postBalance = postBalances.find(
-                post => post.mint === mint && post.owner === pubkeyStr
-              )
+              // Skip SOL pseudo token for now
+              if (mint === "So11111111111111111111111111111111111111112") {
+                continue
+              }
               
-              const postAmount = postBalance 
-                ? new Decimal(postBalance.uiTokenAmount.uiAmount || 0) 
-                : new Decimal(0)
+              if (change.gt(0)) {
+                increaseTokens.push({
+                  mint,
+                  amount: change
+                })
+              } else if (change.lt(0)) {
+                decreaseTokens.push({
+                  mint,
+                  amount: change.abs()
+                })
+              }
+            }
+            
+            // Now check for SOL balance changes
+            const solMint = "So11111111111111111111111111111111111111112"
+            const preSolBal = preBalanceMap[solMint] || new Decimal(0)
+            const postSolBal = postBalanceMap[solMint] || new Decimal(0)
+            const solChange = postSolBal.minus(preSolBal)
+            
+            // Simple heuristic for swaps - one token's balance increases while another decreases
+            
+            // Case 1: SOL → Token (BUY)
+            if (solChange.lt(0) && increaseTokens.length === 1) {
+              const boughtToken = increaseTokens[0]
+              const soldAmount = solChange.abs()
               
-              // If token balance decreased, it might be a sell
-              if (preAmount.gt(postAmount)) {
-                const soldAmount = preAmount.minus(postAmount)
-                const isSol = mint === "So11111111111111111111111111111111111111112"
+              // Initialize token tracking if needed
+              if (!tokenTracker[boughtToken.mint]) {
+                tokenTracker[boughtToken.mint] = {
+                  totalBought: new Decimal(0),
+                  totalSold: new Decimal(0),
+                  totalSpentSol: new Decimal(0),
+                  totalReceivedSol: new Decimal(0),
+                  averageBuyPrice: new Decimal(0),
+                  symbol: "Unknown"
+                }
                 
-                // Track this as a potential trade
-                if (!isSol) {
-                  // Look for a token that increased in the same transaction (the receive side)
-                  for (const postOtherBalance of postBalances) {
-                    if (postOtherBalance.owner === pubkeyStr && postOtherBalance.mint !== mint) {
-                      const otherMint = postOtherBalance.mint
-                      const otherPreBalance = preBalances.find(
-                        pre => pre.mint === otherMint && pre.owner === pubkeyStr
-                      )
-                      
-                      const otherPreAmount = otherPreBalance 
-                        ? new Decimal(otherPreBalance.uiTokenAmount.uiAmount || 0) 
-                        : new Decimal(0)
-                        
-                      const otherPostAmount = new Decimal(postOtherBalance.uiTokenAmount.uiAmount || 0)
-                      
-                      // If the other token increased, we have a swap
-                      if (otherPostAmount.gt(otherPreAmount)) {
-                        const receivedAmount = otherPostAmount.minus(otherPreAmount)
-                        const receivedSol = otherMint === "So11111111111111111111111111111111111111112"
-                        
-                        // Calculate profit/loss if this is a SOL trade
-                        if (receivedSol) {
-                          // This is a token -> SOL trade (sell)
-                          // We'd need historical price data for real profit calculation
-                          // This is a simplified approach
-                          
-                          // Update token tracking
-                          tokenBalances[mint] = tokenBalances[mint] || {
-                            totalBought: new Decimal(0),
-                            totalSold: new Decimal(0),
-                            totalSpentSol: new Decimal(0),
-                            totalReceivedSol: new Decimal(0),
-                          }
-                          
-                          tokenBalances[mint].totalSold = tokenBalances[mint].totalSold.add(soldAmount)
-                          tokenBalances[mint].totalReceivedSol = tokenBalances[mint].totalReceivedSol.add(receivedAmount)
-                          
-                          tradeDetails.push({
-                            type: "SELL",
-                            timestamp: txData.blockTime,
-                            signature: txData.signature,
-                            tokenMint: mint,
-                            tokenAmount: soldAmount,
-                            solAmount: receivedAmount,
-                          })
-                        }
-                      }
-                    }
+                // Try to get token info
+                try {
+                  const tokenInfo = await getTokenInfoFromAggregator(boughtToken.mint)
+                  if (tokenInfo && tokenInfo.symbol) {
+                    tokenTracker[boughtToken.mint].symbol = tokenInfo.symbol
                   }
+                } catch (err) {
+                  logger.error(`Error getting token info for ${boughtToken.mint}:`, err)
                 }
               }
               
-              // If token balance increased, it might be a buy
-              if (postAmount.gt(preAmount)) {
-                const boughtAmount = postAmount.minus(preAmount)
-                const isSol = mint === "So11111111111111111111111111111111111111112"
-                
-                // Track this as a potential trade
-                if (!isSol) {
-                  // Look for a token that decreased in the same transaction (the send side)
-                  for (const preOtherBalance of preBalances) {
-                    if (preOtherBalance.owner === pubkeyStr && preOtherBalance.mint !== mint) {
-                      const otherMint = preOtherBalance.mint
-                      const otherPostBalance = postBalances.find(
-                        post => post.mint === otherMint && post.owner === pubkeyStr
-                      )
-                      
-                      const otherPreAmount = new Decimal(preOtherBalance.uiTokenAmount.uiAmount || 0)
-                      const otherPostAmount = otherPostBalance 
-                        ? new Decimal(otherPostBalance.uiTokenAmount.uiAmount || 0) 
-                        : new Decimal(0)
-                      
-                      // If the other token decreased, we have a swap
-                      if (otherPreAmount.gt(otherPostAmount)) {
-                        const spentAmount = otherPreAmount.minus(otherPostAmount)
-                        const spentSol = otherMint === "So11111111111111111111111111111111111111112"
-                        
-                        // Track buys if paid with SOL
-                        if (spentSol) {
-                          // This is a SOL -> token trade (buy)
-                          
-                          // Update token tracking
-                          tokenBalances[mint] = tokenBalances[mint] || {
-                            totalBought: new Decimal(0),
-                            totalSold: new Decimal(0),
-                            totalSpentSol: new Decimal(0),
-                            totalReceivedSol: new Decimal(0),
-                          }
-                          
-                          tokenBalances[mint].totalBought = tokenBalances[mint].totalBought.add(boughtAmount)
-                          tokenBalances[mint].totalSpentSol = tokenBalances[mint].totalSpentSol.add(spentAmount)
-                          
-                          tradeDetails.push({
-                            type: "BUY",
-                            timestamp: txData.blockTime,
-                            signature: txData.signature,
-                            tokenMint: mint,
-                            tokenAmount: boughtAmount,
-                            solAmount: spentAmount,
-                          })
-                        }
-                      }
-                    }
-                  }
+              // Update token tracking
+              const tracker = tokenTracker[boughtToken.mint]
+              const oldTotal = tracker.totalBought
+              const oldSpent = tracker.totalSpentSol
+              
+              tracker.totalBought = tracker.totalBought.add(boughtToken.amount)
+              tracker.totalSpentSol = tracker.totalSpentSol.add(soldAmount)
+              
+              // Update average buy price
+              if (tracker.totalBought.gt(0)) {
+                tracker.averageBuyPrice = tracker.totalSpentSol.div(tracker.totalBought)
+              }
+              
+              tradeDetails.push({
+                type: "BUY",
+                timestamp: sigInfo.blockTime,
+                signature: sigInfo.signature,
+                tokenMint: boughtToken.mint,
+                tokenAmount: boughtToken.amount,
+                solAmount: soldAmount,
+                symbol: tracker.symbol
+              })
+              
+              logger.info(`Detected BUY trade: ${soldAmount.toFixed(4)} SOL -> ${boughtToken.amount.toFixed(4)} ${tracker.symbol}`)
+            }
+            
+            // Case 2: Token → SOL (SELL)
+            else if (solChange.gt(0) && decreaseTokens.length === 1) {
+              const soldToken = decreaseTokens[0]
+              const receivedAmount = solChange
+              
+              // Skip if we've never tracked this token
+              if (!tokenTracker[soldToken.mint]) {
+                // This could be a token we received via transfer or airdrop
+                // Initialize tracking with what we know
+                tokenTracker[soldToken.mint] = {
+                  totalBought: soldToken.amount, // Assume we somehow acquired this amount
+                  totalSold: soldToken.amount,   // And now we're selling it
+                  totalSpentSol: new Decimal(0), // Unknown cost basis
+                  totalReceivedSol: receivedAmount,
+                  averageBuyPrice: new Decimal(0),
+                  symbol: "Unknown"
                 }
+                
+                // Try to get token info
+                try {
+                  const tokenInfo = await getTokenInfoFromAggregator(soldToken.mint)
+                  if (tokenInfo && tokenInfo.symbol) {
+                    tokenTracker[soldToken.mint].symbol = tokenInfo.symbol
+                  }
+                } catch (err) {
+                  logger.error(`Error getting token info for ${soldToken.mint}:`, err)
+                }
+              } else {
+                // Update existing tracker
+                const tracker = tokenTracker[soldToken.mint]
+                tracker.totalSold = tracker.totalSold.add(soldToken.amount)
+                tracker.totalReceivedSol = tracker.totalReceivedSol.add(receivedAmount)
+              }
+              
+              const tracker = tokenTracker[soldToken.mint]
+              
+              // Calculate profit/loss for this trade
+              const costBasis = tracker.averageBuyPrice.mul(soldToken.amount)
+              const tradePnL = receivedAmount.minus(costBasis)
+              
+              // Track as winning or losing trade
+              if (tradePnL.gt(0)) {
+                totalProfit = totalProfit.add(tradePnL)
+                winningTrades++
+              } else {
+                totalLoss = totalLoss.add(tradePnL.abs())
+                losingTrades++
+              }
+              
+              tradeDetails.push({
+                type: "SELL",
+                timestamp: sigInfo.blockTime,
+                signature: sigInfo.signature,
+                tokenMint: soldToken.mint,
+                tokenAmount: soldToken.amount,
+                solAmount: receivedAmount,
+                pnl: tradePnL,
+                symbol: tracker.symbol
+              })
+              
+              logger.info(`Detected SELL trade: ${soldToken.amount.toFixed(4)} ${tracker.symbol} -> ${receivedAmount.toFixed(4)} SOL (PnL: ${tradePnL.toFixed(4)})`)
+            }
+            
+            // Case 3: Token → Token (Swap)
+            else if (increaseTokens.length === 1 && decreaseTokens.length === 1) {
+              const boughtToken = increaseTokens[0]
+              const soldToken = decreaseTokens[0]
+              
+              // Initialize token tracking if needed for bought token
+              if (!tokenTracker[boughtToken.mint]) {
+                tokenTracker[boughtToken.mint] = {
+                  totalBought: new Decimal(0),
+                  totalSold: new Decimal(0),
+                  totalSpentSol: new Decimal(0),
+                  totalReceivedSol: new Decimal(0),
+                  averageBuyPrice: new Decimal(0),
+                  symbol: "Unknown"
+                }
+                
+                // Try to get token info
+                try {
+                  const tokenInfo = await getTokenInfoFromAggregator(boughtToken.mint)
+                  if (tokenInfo && tokenInfo.symbol) {
+                    tokenTracker[boughtToken.mint].symbol = tokenInfo.symbol
+                  }
+                } catch (err) {
+                  logger.error(`Error getting token info for ${boughtToken.mint}:`, err)
+                }
+              }
+              
+              // Initialize token tracking if needed for sold token
+              if (!tokenTracker[soldToken.mint]) {
+                tokenTracker[soldToken.mint] = {
+                  totalBought: soldToken.amount, // Assume we somehow acquired this amount
+                  totalSold: soldToken.amount,   // And now we're selling it
+                  totalSpentSol: new Decimal(0), // Unknown cost basis
+                  totalReceivedSol: new Decimal(0),
+                  averageBuyPrice: new Decimal(0),
+                  symbol: "Unknown"
+                }
+                
+                // Try to get token info
+                try {
+                  const tokenInfo = await getTokenInfoFromAggregator(soldToken.mint)
+                  if (tokenInfo && tokenInfo.symbol) {
+                    tokenTracker[soldToken.mint].symbol = tokenInfo.symbol
+                  }
+                } catch (err) {
+                  logger.error(`Error getting token info for ${soldToken.mint}:`, err)
+                }
+              }
+              
+              // Getting token prices to estimate SOL value
+              try {
+                const [soldTokenInfo, boughtTokenInfo] = await Promise.all([
+                  getTokenInfoFromAggregator(soldToken.mint),
+                  getTokenInfoFromAggregator(boughtToken.mint)
+                ])
+                
+                if (soldTokenInfo && soldTokenInfo.price && boughtTokenInfo && boughtTokenInfo.price) {
+                  const soldTokenSolPrice = new Decimal(soldTokenInfo.price).div(currentSolPrice)
+                  const boughtTokenSolPrice = new Decimal(boughtTokenInfo.price).div(currentSolPrice)
+                  
+                  const soldSolValue = soldToken.amount.mul(soldTokenSolPrice)
+                  const boughtSolValue = boughtToken.amount.mul(boughtTokenSolPrice)
+                  
+                  // Update token trackers
+                  const soldTracker = tokenTracker[soldToken.mint]
+                  soldTracker.totalSold = soldTracker.totalSold.add(soldToken.amount)
+                  soldTracker.totalReceivedSol = soldTracker.totalReceivedSol.add(boughtSolValue)
+                  
+                  const boughtTracker = tokenTracker[boughtToken.mint]
+                  boughtTracker.totalBought = boughtTracker.totalBought.add(boughtToken.amount)
+                  boughtTracker.totalSpentSol = boughtTracker.totalSpentSol.add(soldSolValue)
+                  
+                  // Update average buy price
+                  if (boughtTracker.totalBought.gt(0)) {
+                    boughtTracker.averageBuyPrice = boughtTracker.totalSpentSol.div(boughtTracker.totalBought)
+                  }
+                  
+                  // This is a token-token swap, so we'll track it but not include in PnL calculation
+                  // since the PnL will be realized when the received token is sold for SOL
+                  tradeDetails.push({
+                    type: "SWAP",
+                    timestamp: sigInfo.blockTime,
+                    signature: sigInfo.signature,
+                    fromTokenMint: soldToken.mint,
+                    fromTokenAmount: soldToken.amount,
+                    fromTokenSymbol: soldTracker.symbol,
+                    toTokenMint: boughtToken.mint,
+                    toTokenAmount: boughtToken.amount,
+                    toTokenSymbol: boughtTracker.symbol,
+                    estimatedSolValue: soldSolValue
+                  })
+                  
+                  logger.info(`Detected token SWAP: ${soldToken.amount.toFixed(4)} ${soldTracker.symbol} -> ${boughtToken.amount.toFixed(4)} ${boughtTracker.symbol}`)
+                }
+              } catch (err) {
+                logger.error(`Error processing token swap:`, err)
               }
             }
           }
+        } catch (err) {
+          logger.error(`Error processing transaction ${sigInfo.signature}:`, err)
         }
-      } catch (err) {
-        logger.error(`Error analyzing transaction ${txData.signature}:`, err)
       }
+    } catch (err) {
+      logger.error("Error fetching transaction history:", err)
     }
     
-    // Calculate profit/loss for each token
+    // Calculate final results for each token
     const tokenPnLs = []
-    for (const [mint, data] of Object.entries(tokenBalances)) {
+    
+    for (const [mint, data] of Object.entries(tokenTracker)) {
       // Only include tokens with both buys and sells
-      if (data.totalBought.gt(0) && data.totalSold.gt(0)) {
-        // Get token info
-        const tokenInfo = await getTokenInfoFromAggregator(mint)
-        const symbol = tokenInfo ? tokenInfo.symbol : "Unknown"
-        
+      if (data.totalBought.gt(0)) {
         // Calculate realized profit/loss
-        const realizedPnL = data.totalReceivedSol.minus(
-          data.totalSpentSol.mul(data.totalSold).div(data.totalBought)
-        )
+        let realizedPnL = new Decimal(0)
+        if (data.totalSold.gt(0)) {
+          const costBasisForSold = data.totalSold.mul(data.averageBuyPrice)
+          realizedPnL = data.totalReceivedSol.minus(costBasisForSold)
+        }
         
         // Calculate unrealized profit/loss for remaining tokens
         const remainingTokens = data.totalBought.minus(data.totalSold)
         let unrealizedPnL = new Decimal(0)
         
-        if (remainingTokens.gt(0) && tokenInfo && tokenInfo.price > 0) {
-          const currentSolPrice = await getSolPriceUSD()
-          const tokenPriceInSol = new Decimal(tokenInfo.price).div(currentSolPrice)
-          unrealizedPnL = remainingTokens.mul(tokenPriceInSol).minus(
-            data.totalSpentSol.mul(remainingTokens).div(data.totalBought)
-          )
+        if (remainingTokens.gt(0)) {
+          try {
+            // Get current token price
+            const tokenInfo = await getTokenInfoFromAggregator(mint)
+            if (tokenInfo && tokenInfo.price > 0) {
+              const tokenSolPrice = new Decimal(tokenInfo.price).div(currentSolPrice)
+              const currentValue = remainingTokens.mul(tokenSolPrice)
+              const costBasis = remainingTokens.mul(data.averageBuyPrice)
+              unrealizedPnL = currentValue.minus(costBasis)
+            }
+          } catch (err) {
+            logger.error(`Error calculating unrealized PnL for ${mint}:`, err)
+          }
         }
         
         const totalPnL = realizedPnL.add(unrealizedPnL)
-        
-        if (totalPnL.gt(0)) {
-          totalProfit = totalProfit.add(totalPnL)
-          winningTrades++
-        } else {
-          totalLoss = totalLoss.add(totalPnL.abs())
-          losingTrades++
-        }
+        const roi = data.totalSpentSol.gt(0) 
+          ? totalPnL.div(data.totalSpentSol).mul(100) 
+          : new Decimal(0)
         
         tokenPnLs.push({
           mint,
-          symbol,
+          symbol: data.symbol,
           realizedPnL,
           unrealizedPnL,
           totalPnL,
-          roi: totalPnL.div(data.totalSpentSol).mul(100),
+          roi,
+          remainingTokens
         })
       }
     }
@@ -2480,7 +2657,7 @@ async function calculatePNL(pubkeyStr, period) {
     // Sort tokens by total PnL (highest first)
     tokenPnLs.sort((a, b) => b.totalPnL.minus(a.totalPnL).toNumber())
     
-    // Calculate totals
+    // Calculate overall PnL
     const netPnL = totalProfit.minus(totalLoss)
     const totalTrades = winningTrades + losingTrades
     const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0
@@ -2496,7 +2673,7 @@ async function calculatePNL(pubkeyStr, period) {
       totalTrades,
       winRate,
       tokenPnLs,
-      tradeDetails,
+      tradeDetails
     }
   } catch (err) {
     logger.error("Error calculating PNL:", err)
@@ -2511,11 +2688,12 @@ async function calculatePNL(pubkeyStr, period) {
       totalTrades: 0,
       winRate: 0,
       tokenPnLs: [],
-      tradeDetails: [],
+      tradeDetails: []
     }
   }
 }
 
+// Format and display PNL information
 // Format and display PNL information
 async function displayPNL(chatId, pnlData) {
   try {
@@ -2554,42 +2732,55 @@ async function displayPNL(chatId, pnlData) {
     // Top performing tokens (limit to top 5)
     const topTokens = pnlData.tokenPnLs.slice(0, 5)
     if (topTokens.length > 0) {
-      message += `\n*Top Tokens (${Math.min(topTokens.length, 5)}):*\n`
+      message += `\n*Token Performance:*\n`
       
       for (const token of topTokens) {
         const roiFormatted = formatPercentage(token.roi.toNumber())
+        const remainingText = token.remainingTokens.gt(0) 
+          ? ` (${token.remainingTokens.toFixed(4)} tokens held)`
+          : ``
         
         if (token.totalPnL.gt(0)) {
-          message += `• ${token.symbol}: +${token.totalPnL.toFixed(4)} SOL (ROI: ${roiFormatted})\n`
+          message += `• ${token.symbol}: +${token.totalPnL.toFixed(4)} SOL (ROI: ${roiFormatted})${remainingText}\n`
         } else {
-          message += `• ${token.symbol}: ${token.totalPnL.toFixed(4)} SOL (ROI: ${roiFormatted})\n`
+          message += `• ${token.symbol}: ${token.totalPnL.toFixed(4)} SOL (ROI: ${roiFormatted})${remainingText}\n`
         }
       }
     }
     
-    // Recent trades (limit to 5 most recent)
-    const recentTrades = pnlData.tradeDetails
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, 5)
-      
-    if (recentTrades.length > 0) {
-      message += `\n*Recent Trades:*\n`
+    // Show instructions if needed
+    if (pnlData.tradeDetails.length === 0 && pnlData.tokenPnLs.length === 0) {
+      message += `\n*No trades found for this time period.*\n\n`
+      message += `Note: PNL tracking works by analyzing your on-chain transaction history for token swaps. `
+      message += `If you've made trades that aren't showing, try selecting a longer time period.`
+    } 
+    // Show recent trades info
+    else if (pnlData.tradeDetails.length > 0) {
+      // Get up to 5 most recent trades
+      const recentTrades = pnlData.tradeDetails
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .slice(0, 5)
+        
+      message += `\n*Recent Transactions:*\n`
       
       for (const trade of recentTrades) {
         const date = new Date(trade.timestamp * 1000)
-        const dateStr = date.toLocaleDateString()
+        const dateStr = `${date.getMonth()+1}/${date.getDate()}`
         
         if (trade.type === "BUY") {
-          message += `• 💰 Buy: ${trade.solAmount.toFixed(4)} SOL → ${trade.tokenAmount.toFixed(4)} tokens (${dateStr})\n`
-        } else {
-          message += `• 💱 Sell: ${trade.tokenAmount.toFixed(4)} tokens → ${trade.solAmount.toFixed(4)} SOL (${dateStr})\n`
+          message += `• 💰 Buy: ${trade.solAmount.toFixed(4)} SOL → ${trade.tokenAmount.toFixed(4)} ${trade.symbol} (${dateStr})\n`
+        } else if (trade.type === "SELL") {
+          const pnlText = trade.pnl 
+            ? (trade.pnl.gt(0) ? ` (+${trade.pnl.toFixed(4)})` : ` (${trade.pnl.toFixed(4)})`) 
+            : ""
+          message += `• 💱 Sell: ${trade.tokenAmount.toFixed(4)} ${trade.symbol} → ${trade.solAmount.toFixed(4)} SOL${pnlText} (${dateStr})\n`
+        } else if (trade.type === "SWAP") {
+          message += `• 🔄 Swap: ${trade.fromTokenAmount.toFixed(4)} ${trade.fromTokenSymbol} → ${trade.toTokenAmount.toFixed(4)} ${trade.toTokenSymbol} (${dateStr})\n`
         }
       }
-    }
-    
-    // If no trades found
-    if (pnlData.totalTrades === 0) {
-      message += `\n*No trades found for this time period.*`
+      
+      // Add a link to view more details
+      message += `\n*View details:* [Solscan](https://solscan.io/address/${pnlData.walletAddress || ""})`
     }
     
     // Send the message
@@ -2600,7 +2791,8 @@ async function displayPNL(chatId, pnlData) {
           [{ text: "« Back to Time Periods", callback_data: "PNL_MENU" }],
           [{ text: "« Back to Main Menu", callback_data: "BACK_MAIN" }]
         ]
-      }
+      },
+      disable_web_page_preview: true
     })
   } catch (err) {
     logger.error("Error displaying PNL:", err)
