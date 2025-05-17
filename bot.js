@@ -2508,7 +2508,7 @@ function formatPnLResults(periodLabel, periodStats, overallStats, filter = "all"
 
 // Show PnL menu to user
 async function showPnLMenu(chatId, messageId) {
-  const message = `📈 *Profit & Loss Calculator*\n\nAnalyze your wallet's performance by selecting a time period:`;
+  const message = `📈 *Profit & Loss Analysis*\n\nAnalyze your wallet's performance by selecting a time period:`;
   
   const keyboard = {
     inline_keyboard: [
