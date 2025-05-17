@@ -810,35 +810,6 @@ bot.onText(/\/pnl/, (msg) => {
   }
 })
 
-// Home command - Fixed to match /start behavior
-bot.onText(/\/home/, async (msg) => {
-  try {
-    const chatId = msg.chat.id;
-    clearPendingForSlash(chatId);
-    logger.info("/home => " + chatId);
-
-    // Try to delete the old /home message if possible
-    try {
-      if (msg.message_id) {
-        await bot.deleteMessage(chatId, msg.message_id).catch(e => {});
-      }
-    } catch (e) {
-      logger.warn("Could not delete message:", e.message);
-    }
-
-    // Send loading message first
-    const loadingMsg = await bot.sendMessage(chatId, `🔄 Loading wallet overview...`, {
-      parse_mode: "Markdown"
-    });
-
-    // Always call showMainMenu directly to ensure fresh data
-    await showMainMenu(chatId, loadingMsg.message_id);
-    
-  } catch (err) {
-    logger.error("/home command error:", err);
-    await bot.sendMessage(chatId, "Error loading wallet data. Please try again.");
-  }
-});
 
 // Connect Wallet
 bot.onText(/\/connect/, async (msg) => {
@@ -1023,33 +994,28 @@ case "PNL_FILTER_transfer":
                 })
 
                 const uu = await getUserRow(c)
-                if (uu && uu.public_key) {
-                  const sb = await getSolBalance(uu.public_key)
-                  const sp = await getSolPriceUSD()
-                  const su = sb.mul(sp)
-                  const minA = await getMinAutoTradeUsd()
-                  if (!uu.auto_trade_unlocked && su.gte(minA)) {
-                    await unlockAutoTrade(c)
-                    uu.auto_trade_unlocked = 1
-                  }
-                  const link = "https://solscan.io/account/" + uu.public_key
-                  let txt = "💳 *Your Wallet*\n"
-                  txt += " ↳ " + uu.public_key + " [Solscan](" + link + ")\n"
-                  txt += " ↳ Balance: *" + sb.toFixed(4) + " SOL*\n\n"
-                  txt += "💰 *SOL Price:* $" + sp.toFixed(2)
-                  const ae = Boolean(uu.auto_trade_enabled)
-                  await bot.sendMessage(c, txt, {
-                    parse_mode: "Markdown",
-                    reply_markup: mainMenuKeyboard(ae),
-                    disable_web_page_preview: true,
-                  })
-                } else {
-                  await bot.sendMessage(c, "An error occurred. Please try /start again.", {
-                    reply_markup: {
-                      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
-                    },
-                  })
-                }
+if (uu && uu.public_key) {
+  const sb = await getSolBalance(uu.public_key)
+  const sp = await getSolPriceUSD()
+  const su = sb.mul(sp)
+  const minA = await getMinAutoTradeUsd()
+  if (!uu.auto_trade_unlocked && su.gte(minA)) {
+    await unlockAutoTrade(c)
+    uu.auto_trade_unlocked = 1
+  }
+  
+  // Load the main menu with the updated wallet info
+  const loadingMsg = await bot.sendMessage(c, `🔄 Loading wallet...`, {
+    parse_mode: "Markdown"
+  })
+  await showMainMenu(c, loadingMsg.message_id)
+} else {
+  await bot.sendMessage(c, "An error occurred. Please try /start again.", {
+    reply_markup: {
+      inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+    },
+  })
+}
               } catch(e) {
                 logger.error(e)
                 await bot.sendMessage(c, "Invalid private key. Import cancelled.", {
@@ -2181,7 +2147,6 @@ async function showSellTokensList(chatId) {
 // ---------------------------------------------------------
 bot.setMyCommands([
   { command: "start", description: "Show the main menu" },
-  { command: "home", description: "Show wallet overview" },
   { command: "positions", description: "Check your SOL & token positions" },
   { command: "buy", description: "Buy tokens (swap SOL->token)" },
   { command: "sell", description: "Sell tokens (swap token->SOL)" },
@@ -2337,7 +2302,6 @@ bot.onText(/\/settings/, (msg) => {
     logger.error("/settings command error:", err)
   }
 })
-
 
 // ---------------------------------------------------------
 // PnL Helper Functions
