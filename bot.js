@@ -125,6 +125,14 @@ const pendingMessageHandlers = {}
 // A dictionary for ephemeral session data (like storing token info so you don't lose it)
 const userSessions = {}
 
+function updateMainMenuMessageId(chatId, messageId) {
+  if (!userSessions[chatId]) {
+    userSessions[chatId] = {};
+  }
+  userSessions[chatId].mainMenuMessageId = messageId;
+  logger.info(`Updated main menu message ID for ${chatId}: ${messageId}`);
+}
+
 // Clear pending handler for a chat
 function clearPendingMessageHandler(chatId) {
   if (pendingMessageHandlers[chatId]) {
@@ -208,25 +216,6 @@ function initD() {
 // ---------------------------------------------------------
 // Helpers to get/set config values, with try/catch
 // ---------------------------------------------------------
-
-async function deleteAndShowMainMenu(chatId, messageId) {
-  try {
-    // Try to delete the current message
-    await bot.deleteMessage(chatId, messageId).catch(e => {
-      logger.warn("Could not delete message:", e.message);
-    });
-    
-    // Send a new main menu
-    const loadingMsg = await bot.sendMessage(chatId, `🔄 Loading main menu...`, {
-      parse_mode: "Markdown"
-    });
-    await showMainMenu(chatId, loadingMsg.message_id);
-  } catch (err) {
-    logger.error("deleteAndShowMainMenu error:", err);
-    await showMainMenu(chatId, messageId); // Fallback to just editing
-  }
-}
-
 async function getConfigValue(k) {
   try {
     return await new Promise((resolve, reject) => {
@@ -765,6 +754,7 @@ async function showMainMenu(chatId, messageId) {
 
     await editMessageText(chatId, messageId, message, replyMarkup);
     
+    updateMainMenuMessageId(chatId, messageId);
     // Check if we need to unlock auto-trade for connected wallets
     if (u && u.public_key && !u.auto_trade_unlocked) {
       const solBalance = await getSolBalance(u.public_key);
@@ -786,7 +776,6 @@ function clearPendingForSlash(id) {
   clearPendingMessageHandler(id)
 }
 
-// Start command
 bot.onText(/\/start/, async (msg) => {
   try {
     const chatId = msg.chat.id;
@@ -808,6 +797,7 @@ bot.onText(/\/start/, async (msg) => {
     });
 
     await showMainMenu(chatId, loadingMsg.message_id);
+    // The main menu ID is already tracked in showMainMenu
     
   } catch (err) {
     logger.error("/start command error:", err);
@@ -949,24 +939,55 @@ bot.on("callback_query", async (query) => {
 
         case "PNL_MENU":
           await bot.answerCallbackQuery(query.id)
-          // Create a new PnL message instead of editing the current one
-          const pnlMsg = await bot.sendMessage(c, "Loading PnL calculator...", { 
-            parse_mode: "Markdown" 
-          });
-          await showPnLMenu(c, pnlMsg.message_id)
+          // Store the original message ID
+          if (!userSessions[c]) {
+            userSessions[c] = {}
+          }
+          userSessions[c].pnlSourceMessageId = mid;
+          const newMid = await showPnLMenu(c, mid)
+          // Update mid if it changed
+          if (newMid && newMid !== mid) {
+            userSessions[c].pnlMessageId = newMid;
+          }
           break
 
-          case "PNL_PERIOD_24h":
-            case "PNL_PERIOD_3d":
-            case "PNL_PERIOD_7d":
-            case "PNL_PERIOD_1m":
-            case "PNL_PERIOD_1y":
-              await bot.answerCallbackQuery(query.id, { text: "Calculating..." })
-              {
-                const period = d.replace("PNL_PERIOD_", "")
-                await processPnL(c, period, mid) // Pass the message ID
-              }
-              break
+          case "BACK_MAIN_DELETE":
+  await bot.answerCallbackQuery(query.id)
+  {
+    // Get the main menu message ID
+    const mainMenuId = userSessions[c]?.mainMenuMessageId;
+    
+    // If we have a valid main menu ID
+    if (mainMenuId && mainMenuId !== mid) {
+      try {
+        // Delete the current message
+        await bot.deleteMessage(c, mid);
+        
+        // Refresh the main menu
+        await showMainMenu(c, mainMenuId);
+      } catch(e) {
+        logger.error("Error handling BACK_MAIN_DELETE:", e);
+        // If deleting fails, just go back to main menu as normal
+        await showMainMenu(c, mid);
+      }
+    } else {
+      // If no main menu ID or it's the same as current, just show main menu
+      await showMainMenu(c, mid);
+    }
+  }
+  break
+
+case "PNL_PERIOD_24h":
+case "PNL_PERIOD_3d":
+case "PNL_PERIOD_7d":
+case "PNL_PERIOD_1m":
+case "PNL_PERIOD_1y":
+  await bot.answerCallbackQuery(query.id, { text: "Calculating..." })
+  {
+    const period = d.replace("PNL_PERIOD_", "")
+    await processPnL(c, period)
+  }
+  break
 
 case "PNL_FILTER_all":
 case "PNL_FILTER_trade":
@@ -1112,24 +1133,16 @@ if (uu && uu.public_key) {
           await bot.sendMessage(c, txt, {
             parse_mode: "Markdown",
             reply_markup: {
-              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN_DELETE" }]],
             },
           })
         }
         break
 
-        case "BACK_MAIN":
-          await bot.answerCallbackQuery(query.id)
-          
-          // Delete message and create new main menu if it's from PnL
-          const fromPnl = query.message.text && query.message.text.includes("Profit & Loss Analysis");
-          if (fromPnl) {
-            await deleteAndShowMainMenu(c, mid)
-          } else {
-            // Just edit the current message
-            await showMainMenu(c, mid)
-          }
-          break
+      case "BACK_MAIN":
+        await bot.answerCallbackQuery(query.id)
+        await showMainMenu(c, mid)
+        break
 
       case "SETTINGS_MENU":
         await bot.answerCallbackQuery(query.id)
@@ -1296,7 +1309,7 @@ Higher allocations get *priority access + optimized trade execution*`;
                 const promptMsg = await bot.sendMessage(c, userBalMsg, {
                     parse_mode: "Markdown",
                     reply_markup: {
-                        inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN" }]],
+                        inline_keyboard: [[{ text: "« Cancel", callback_data: "BACK_MAIN_DELETE" }]],
                     },
                 });
     
@@ -1390,7 +1403,7 @@ Higher allocations get *priority access + optimized trade execution*`;
         {
           const askA = await bot.sendMessage(c, "Enter recipient Solana address:", {
             reply_markup: {
-              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN_DELETE" }]],
             },
           })
 
@@ -1489,28 +1502,22 @@ Higher allocations get *priority access + optimized trade execution*`;
         }
         break
 
-        case "BUY_MENU_BACK":
-          await bot.answerCallbackQuery(query.id)
-          await deleteAndShowMainMenu(c, mid)
-          break
+      case "BUY_MENU":
+        await bot.answerCallbackQuery(query.id)
+        {
+          // Make sure we have a session object for this user
+          userSessions[c] = userSessions[c] || {}
+          userSessions[c].tokenInfo = null
 
-
-        case "BUY_MENU":
-          await bot.answerCallbackQuery(query.id)
-          {
-            // Make sure we have a session object for this user
-            userSessions[c] = userSessions[c] || {}
-            userSessions[c].tokenInfo = null
-        
-            // Show user balance here so they know how much SOL they have before picking a token
-            const userSolBal = await getSolBalance(u.public_key)
-            const buyPrompt = `Your SOL Balance: *${userSolBal.toFixed(4)} SOL*\nEnter token symbol or address to buy:`
-            const am = await bot.sendMessage(c, buyPrompt, {
-              parse_mode: "Markdown",
-              reply_markup: {
-                inline_keyboard: [[{ text: "« Back", callback_data: "BUY_MENU_BACK" }]], // <-- Changed this
-              },
-            })
+          // Show user balance here so they know how much SOL they have before picking a token
+          const userSolBal = await getSolBalance(u.public_key)
+          const buyPrompt = `Your SOL Balance: *${userSolBal.toFixed(4)} SOL*\nEnter token symbol or address to buy:`
+          const am = await bot.sendMessage(c, buyPrompt, {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN_DELETE" }]],
+            },
+          })
 
           pendingMessageHandlers[c] = async (m2) => {
             try {
@@ -1813,11 +1820,6 @@ ${wBalanceLine}`
         }
         break
 
-        case "SELL_MENU_BACK":
-  await bot.answerCallbackQuery(query.id)
-  await deleteAndShowMainMenu(c, mid)
-  break
-
       // *** SELL UPGRADE ***
       case "SELL_MENU":
         await bot.answerCallbackQuery(query.id)
@@ -1833,7 +1835,7 @@ ${wBalanceLine}`
           if (!nonSolTokens.length) {
             await bot.sendMessage(c, "You do not have any tokens yet! Start trading in the Buy menu.", {
               reply_markup: {
-                inline_keyboard: [[{ text: "« Back", callback_data: "SELL_MENU_BACK" }]],
+                inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
               },
             })
             return
@@ -2164,7 +2166,7 @@ async function showSellTokensList(chatId) {
     // Add Refresh + Back row
     inlineKb.push([
       { text: "Refresh", callback_data: "SELL_PAGE_REFRESH" },
-      { text: "« Back", callback_data: "BACK_MAIN" },
+      { text: "« Back", callback_data: "BACK_MAIN_DELETE" },
     ])
 
     await bot.sendMessage(chatId, txt, {
@@ -2512,7 +2514,6 @@ function formatPnLResults(periodLabel, periodStats, overallStats, filter = "all"
   return message;
 }
 
-// Show PnL menu to user
 async function showPnLMenu(chatId, messageId) {
   const message = `📈 *Profit & Loss Analysis*\n\nAnalyze your wallet's performance by selecting a time period:`;
   
@@ -2530,50 +2531,86 @@ async function showPnLMenu(chatId, messageId) {
         { text: "1 Year", callback_data: "PNL_PERIOD_1y" },
       ],
       [
-        { text: "« Back to Main", callback_data: "BACK_MAIN" },
+        { text: "« Back to Main", callback_data: "BACK_MAIN_DELETE" },
       ],
     ],
   };
   
-  await editMessageText(chatId, messageId, message, keyboard);
+  // Delete the current message if it's not the main menu message
+  const mainMenuId = userSessions[chatId]?.mainMenuMessageId;
+  if (messageId !== mainMenuId) {
+    try {
+      await bot.deleteMessage(chatId, messageId);
+    } catch(e) {
+      logger.warn("Could not delete message:", e.message);
+    }
+    
+    // Send a new message instead of editing
+    const newMsg = await bot.sendMessage(chatId, message, {
+      parse_mode: "Markdown",
+      reply_markup: keyboard
+    });
+    
+    return newMsg.message_id;
+  } else {
+    // If it is the main menu, just edit it
+    await editMessageText(chatId, messageId, message, keyboard);
+    return messageId;
+  }
 }
 
-// Process PnL calculation for a specific period
-async function processPnL(chatId, period, messageId) {
+async function processPnL(chatId, period) {
   try {
     const u = await getUserRow(chatId);
     if (!u || !u.public_key) {
       await bot.sendMessage(chatId, "Please connect a wallet first to use this feature.", {
         reply_markup: {
-          inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN" }]],
+          inline_keyboard: [[{ text: "« Back", callback_data: "BACK_MAIN_DELETE" }]],
         },
       });
       return;
     }
 
-    // Create a loading message
-    const loadingMsg = await bot.sendMessage(chatId, `⏳ *Calculating ${period} PnL...*\nFetching transaction history, please wait...`, {
-      parse_mode: "Markdown"
-    });
+    // Get the message ID stored from PNL_MENU callback
+    const messageId = userSessions[chatId]?.pnlMessageId;
+    
+    // If we have a message ID, update it with loading text
+    if (messageId) {
+      await bot.editMessageText(`⏳ *Calculating ${period} PnL...*\nFetching transaction history, please wait...`, {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: "Markdown"
+      });
+    } else {
+      // Fallback to creating a new message if needed
+      const loadingMsg = await bot.sendMessage(chatId, `⏳ *Calculating ${period} PnL...*\nFetching transaction history, please wait...`, {
+        parse_mode: "Markdown"
+      });
+      userSessions[chatId] = userSessions[chatId] || {};
+      userSessions[chatId].pnlMessageId = loadingMsg.message_id;
+    }
 
     // Calculate start timestamp based on period
     const nowTs = Math.floor(Date.now() / 1000);
     const startTs = nowTs - PERIOD_SEC[period];
     
+    // Get the current message ID (may have been updated)
+    const currentMsgId = userSessions[chatId]?.pnlMessageId || messageId;
+    
     // Fetch transactions
     const transactions = await fetchWalletTransactions(u.public_key, startTs);
     
-// Use the current message instead of creating a new one
-await bot.editMessageText(`⏳ *Calculating ${period} PnL...*\nFetching transaction history, please wait...`, {
-  chat_id: chatId,
-  message_id: messageId,
-  parse_mode: "Markdown"
-});
+    // Update message to show progress
+    await bot.editMessageText(`⏳ *Calculating ${period} PnL...*\nAnalyzing ${transactions.length} transactions...`, {
+      chat_id: chatId,
+      message_id: currentMsgId,
+      parse_mode: "Markdown"
+    });
     
     if (transactions.length === 0) {
       await bot.editMessageText(`No transactions found in the last ${period}.`, {
         chat_id: chatId,
-        message_id: loadingMsg.message_id,
+        message_id: currentMsgId,
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [[{ text: "« Back", callback_data: "PNL_MENU" }]],
@@ -2608,7 +2645,7 @@ await bot.editMessageText(`⏳ *Calculating ${period} PnL...*\nFetching transact
         ],
         [
           { text: "« Back to Periods", callback_data: "PNL_MENU" },
-          { text: "« Back to Main", callback_data: "BACK_MAIN" },
+          { text: "« Back to Main", callback_data: "BACK_MAIN_DELETE" },
         ],
       ],
     };
@@ -2616,7 +2653,7 @@ await bot.editMessageText(`⏳ *Calculating ${period} PnL...*\nFetching transact
     // Update the message with results
     await bot.editMessageText(message, {
       chat_id: chatId,
-      message_id: loadingMsg.message_id,
+      message_id: currentMsgId,
       parse_mode: "Markdown",
       reply_markup: keyboard,
     });
