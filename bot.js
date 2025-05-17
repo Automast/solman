@@ -76,7 +76,7 @@ const DB_PATH = "bot_database.db"
 const DEFAULT_SLIPPAGE = 1
 const BOT_TOKEN =
   "8159028692:AAHcccHrkyolMK1S8XzL-sEErnQgHn7CGlw" // Hard-coded as in original
-  const HELIUS_API_KEY = process.env.HELIUS_API_KEY || "YOUR_HELIUS_API_KEY_HERE" // Get a free key from https://helius.xyz
+  const HELIUS_API_KEY = process.env.HELIUS_API_KEY || "bc4dcb84-187c-4f7e-8503-cd42a6a10c6b"
 
 // Initialize main Telegram bot
 bot = new TelegramBot(BOT_TOKEN, { polling: true })
